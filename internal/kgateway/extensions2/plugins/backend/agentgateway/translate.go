@@ -277,6 +277,9 @@ func buildMCPIr(krtctx krt.HandlerContext, be *v1alpha1.Backend, services krt.Co
 					Port: uint32(targetSelector.StaticTarget.Port),
 				},
 			}
+			if targetSelector.StaticTarget.Path != nil {
+				mcpTarget.Path = *targetSelector.StaticTarget.Path
+			}
 
 			// Convert protocol if specified
 			switch targetSelector.StaticTarget.Protocol {
