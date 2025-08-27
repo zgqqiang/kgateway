@@ -73,6 +73,23 @@ func convertHTTPRouteToADP(ctx RouteContext, r gwv1.HTTPRouteRule, obj *gwv1.HTT
 	filters, filterError := buildADPFilters(ctx, obj.Namespace, r.Filters)
 	res.Filters = filters
 
+	if err := applyTimeouts(&r, res); err != nil {
+		return nil, &reporter.RouteCondition{
+			Type:    gwv1.RouteConditionAccepted,
+			Status:  metav1.ConditionFalse,
+			Reason:  "TranslationError",
+			Message: fmt.Sprintf("failed to apply builtin route timeout: %v", err),
+		}
+	}
+	if err := applyRetries(&r, res); err != nil {
+		return nil, &reporter.RouteCondition{
+			Type:    gwv1.RouteConditionAccepted,
+			Status:  metav1.ConditionFalse,
+			Reason:  "TranslationError",
+			Message: fmt.Sprintf("failed to apply builtin route retries: %v", err),
+		}
+	}
+
 	if pluginErr := applyPluginPasses(ctx, &r, res); pluginErr != nil {
 		return nil, pluginErr
 	}
