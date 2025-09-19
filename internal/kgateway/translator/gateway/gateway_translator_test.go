@@ -19,6 +19,7 @@ import (
 	"github.com/kgateway-dev/kgateway/v2/api/settings"
 	"github.com/kgateway-dev/kgateway/v2/api/v1alpha1"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/krtcollections"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/translator/listener"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/wellknown"
 	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/reporter"
 	"github.com/kgateway-dev/kgateway/v2/pkg/reports"
@@ -165,7 +166,7 @@ func TestBasic(t *testing.T) {
 				a.NotNil(programmed)
 				a.Equal(metav1.ConditionFalse, programmed.Status)
 				a.Equal(string(gwv1.ListenerReasonInvalid), programmed.Reason)
-				a.Equal("Secret default/missing-cert not found.", programmed.Message)
+				a.Equal(fmt.Sprintf(listener.SecretNotFoundMessageTemplate, "default", "missing-cert"), programmed.Message)
 
 				https2Listener := gatewayStatus.Listeners[1]
 				resolvedRefs = meta.FindStatusCondition(https2Listener.Conditions, string(gwv1.ListenerConditionResolvedRefs))
@@ -1433,6 +1434,174 @@ func TestBasic(t *testing.T) {
 		test(t, translatorTestCase{
 			inputFile:  "traffic-policy/rate-limit-full-config.yaml",
 			outputFile: "traffic-policy/rate-limit-full-config.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+		})
+	})
+
+	t.Run("TLS listener with no routes", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/tls-listener-no-routes.yaml",
+			outputFile: "invalid-filter-chains/tls-listener-no-routes.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+		})
+	})
+
+	t.Run("TCP listener with no routes", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/tcp-listener-no-routes.yaml",
+			outputFile: "invalid-filter-chains/tcp-listener-no-routes.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+		})
+	})
+
+	t.Run("HTTPS listener with invalid secret ref", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/https-listener-invalid-secret-ref.yaml",
+			outputFile: "invalid-filter-chains/https-listener-invalid-secret-ref.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+		})
+	})
+
+	t.Run("HTTPS listener with invalid secret (missing private key)", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/https-listener-invalid-secret.yaml",
+			outputFile: "invalid-filter-chains/https-listener-invalid-secret.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+		})
+	})
+
+	t.Run("TLS mixed listeners - no routes and with routes", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/tls-mixed-listeners.yaml",
+			outputFile: "invalid-filter-chains/tls-mixed-listeners.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+		})
+	})
+
+	t.Run("TCP mixed listeners - no routes and with routes", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/tcp-mixed-listeners.yaml",
+			outputFile: "invalid-filter-chains/tcp-mixed-listeners.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+		})
+	})
+
+	t.Run("TLS same port listeners - both with no routes", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/tls-same-port-both-no-routes.yaml",
+			outputFile: "invalid-filter-chains/tls-same-port-both-no-routes.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+		})
+	})
+
+	t.Run("TLS same port listeners - mixed routes", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/tls-same-port-mixed-routes.yaml",
+			outputFile: "invalid-filter-chains/tls-same-port-mixed-routes.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+		})
+	})
+
+	t.Run("TLS route with invalid backend", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/tls-route-invalid-backend.yaml",
+			outputFile: "invalid-filter-chains/tls-route-invalid-backend.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+			assertReports: func(gwNN types.NamespacedName, reportsMap reports.ReportMap) {
+				// No-op: Expected statuses are validated via the output file comparison
+			},
+		})
+	})
+
+	t.Run("HTTPS mixed listeners - invalid and valid secret refs", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/https-mixed-listeners.yaml",
+			outputFile: "invalid-filter-chains/https-mixed-listeners.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+		})
+	})
+
+	t.Run("Gateway empty with ListenerSet TCP listener no routes", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/gateway-empty-listenerset-tcp-no-routes.yaml",
+			outputFile: "invalid-filter-chains/gateway-empty-listenerset-tcp-no-routes.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+		})
+	})
+
+	t.Run("Gateway empty with ListenerSet TLS listener no routes", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/gateway-empty-listenerset-tls-no-routes.yaml",
+			outputFile: "invalid-filter-chains/gateway-empty-listenerset-tls-no-routes.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+		})
+	})
+
+	t.Run("Gateway empty with ListenerSet TLS mixed listeners", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/gateway-empty-listenerset-tls-mixed.yaml",
+			outputFile: "invalid-filter-chains/gateway-empty-listenerset-tls-mixed.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+		})
+	})
+
+	t.Run("Gateway HTTP listener with ListenerSet TCP listener no routes", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/gateway-http-listenerset-tcp-no-routes.yaml",
+			outputFile: "invalid-filter-chains/gateway-http-listenerset-tcp-no-routes.yaml",
+			gwNN: types.NamespacedName{
+				Namespace: "default",
+				Name:      "example-gateway",
+			},
+		})
+	})
+
+	t.Run("Gateway TCP listener no routes with ListenerSet HTTP listener", func(t *testing.T) {
+		test(t, translatorTestCase{
+			inputFile:  "invalid-filter-chains/gateway-tcp-no-routes-listenerset-http.yaml",
+			outputFile: "invalid-filter-chains/gateway-tcp-no-routes-listenerset-http.yaml",
 			gwNN: types.NamespacedName{
 				Namespace: "default",
 				Name:      "example-gateway",
