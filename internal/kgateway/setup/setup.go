@@ -48,6 +48,12 @@ func WithGatewayControllerName(name string) func(*setup) {
 	}
 }
 
+func WithAgwControllerName(name string) func(*setup) {
+	return func(s *setup) {
+		s.agwControllerName = name
+	}
+}
+
 func WithGatewayClassName(name string) func(*setup) {
 	return func(s *setup) {
 		s.gatewayClassName = name
@@ -122,6 +128,13 @@ func WithXDSListener(l net.Listener) func(*setup) {
 	}
 }
 
+// used for tests only to get access to dynamically assigned port number
+func WithAgwXDSListener(l net.Listener) func(*setup) {
+	return func(s *setup) {
+		s.agwXdsListener = l
+	}
+}
+
 func WithExtraManagerConfig(mgrConfigFuncs ...func(ctx context.Context, mgr manager.Manager, objectFilter kubetypes.DynamicObjectFilter) error) func(*setup) {
 	return func(s *setup) {
 		s.extraManagerConfig = mgrConfigFuncs
@@ -148,6 +161,7 @@ func WithValidator(v validator.Validator) func(*setup) {
 
 type setup struct {
 	gatewayControllerName    string
+	agwControllerName        string
 	gatewayClassName         string
 	waypointClassName        string
 	agentgatewayClassName    string
@@ -157,6 +171,7 @@ type setup struct {
 	extraGatewayParameters   func(cli client.Client, inputs *deployer.Inputs) []deployer.ExtraGatewayParameters
 	extraXDSCallbacks        xdsserver.Callbacks
 	xdsListener              net.Listener
+	agwXdsListener           net.Listener
 	restConfig               *rest.Config
 	ctrlMgrOptionsInitFunc   func(context.Context) *ctrl.Options
 	// extra controller manager config, like adding registering additional controllers
@@ -172,6 +187,7 @@ var _ Server = &setup{}
 func New(opts ...func(*setup)) (*setup, error) {
 	s := &setup{
 		gatewayControllerName: wellknown.DefaultGatewayControllerName,
+		agwControllerName:     wellknown.DefaultAgwControllerName,
 		gatewayClassName:      wellknown.DefaultGatewayClassName,
 		waypointClassName:     wellknown.DefaultWaypointClassName,
 		agentgatewayClassName: wellknown.DefaultAgwClassName,
@@ -224,6 +240,15 @@ func New(opts ...func(*setup)) (*setup, error) {
 		}
 	}
 
+	if s.agwXdsListener == nil {
+		var err error
+		s.agwXdsListener, err = newXDSListener("0.0.0.0", s.globalSettings.AgentgatewayXdsServicePort)
+		if err != nil {
+			slog.Error("error creating agw xds listener", "error", err)
+			return nil, err
+		}
+	}
+
 	if s.validator == nil {
 		s.validator = validator.NewBinary()
 	}
@@ -252,7 +277,7 @@ func (s *setup) Start(ctx context.Context) error {
 	}
 
 	uniqueClientCallbacks, uccBuilder := krtcollections.NewUniquelyConnectedClients(s.extraXDSCallbacks)
-	cache := NewControlPlane(ctx, s.xdsListener, uniqueClientCallbacks)
+	cache := NewControlPlane(ctx, s.xdsListener, s.agwXdsListener, uniqueClientCallbacks)
 
 	setupOpts := &controller.SetupOpts{
 		Cache:          cache,
@@ -306,7 +331,7 @@ func (s *setup) Start(ctx context.Context) error {
 	}
 
 	BuildKgatewayWithConfig(
-		ctx, mgr, s.gatewayControllerName, s.gatewayClassName, s.waypointClassName,
+		ctx, mgr, s.gatewayControllerName, s.agwControllerName, s.gatewayClassName, s.waypointClassName,
 		s.agentgatewayClassName, s.additionalGatewayClasses, setupOpts, s.restConfig,
 		istioClient, commoncol, agwCollections, uccBuilder, s.extraPlugins, s.extraAgwPlugins,
 		s.extraGatewayParameters,
@@ -329,6 +354,7 @@ func BuildKgatewayWithConfig(
 	ctx context.Context,
 	mgr manager.Manager,
 	gatewayControllerName string,
+	agwControllerName string,
 	gatewayClassName string,
 	waypointClassName string,
 	agentgatewayClassName string,
@@ -359,6 +385,7 @@ func BuildKgatewayWithConfig(
 	c, err := controller.NewControllerBuilder(ctx, controller.StartConfig{
 		Manager:                  mgr,
 		ControllerName:           gatewayControllerName,
+		AgwControllerName:        agwControllerName,
 		GatewayClassName:         gatewayClassName,
 		WaypointGatewayClassName: waypointClassName,
 		AgentgatewayClassName:    agentgatewayClassName,

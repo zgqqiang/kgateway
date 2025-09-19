@@ -220,7 +220,7 @@ func TestGatewayGVKsToWatch(t *testing.T) {
 	cli := newFakeClientWithObjs(gwc, gwParams)
 	gwp := NewGatewayParameters(cli, defaultInputs(t, gwc))
 
-	d, err := NewGatewayDeployer(wellknown.DefaultGatewayControllerName, cli, gwp)
+	d, err := NewGatewayDeployer(wellknown.DefaultGatewayControllerName, wellknown.DefaultAgwControllerName, wellknown.DefaultAgwClassName, cli, gwp)
 	assert.NoError(t, err)
 
 	gvks, err := GatewayGVKsToWatch(context.TODO(), d)
@@ -239,7 +239,7 @@ func TestInferencePoolGVKsToWatch(t *testing.T) {
 	gwParams := emptyGatewayParameters()
 	cli := newFakeClientWithObjs(gwc, gwParams)
 
-	d, err := NewInferencePoolDeployer(wellknown.DefaultGatewayControllerName, cli)
+	d, err := NewInferencePoolDeployer(wellknown.DefaultGatewayControllerName, wellknown.DefaultAgwControllerName, wellknown.DefaultAgwClassName, cli)
 	assert.NoError(t, err)
 
 	gvks, err := InferencePoolGVKsToWatch(context.TODO(), d)
@@ -290,8 +290,9 @@ func defaultInputs(t *testing.T, objs ...client.Object) *deployer.Inputs {
 		CommonCollections: newCommonCols(t, objs...),
 		Dev:               false,
 		ControlPlane: deployer.ControlPlaneInfo{
-			XdsHost: "something.cluster.local",
-			XdsPort: 1234,
+			XdsHost:    "something.cluster.local",
+			XdsPort:    1234,
+			AgwXdsPort: 5678,
 		},
 		ImageInfo: &deployer.ImageInfo{
 			Registry: "foo",
