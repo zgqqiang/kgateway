@@ -609,8 +609,6 @@ func (tc TestCase) Run(
 
 	// ensure classes used in tests exist and point at our controller
 	gwClasses := []string{
-		wellknown.DefaultGatewayClassName,
-		wellknown.DefaultWaypointClassName,
 		wellknown.DefaultAgwClassName,
 	}
 	for _, className := range gwClasses {
@@ -661,6 +659,7 @@ func (tc TestCase) Run(
 	// Create AgwCollections with the necessary input collections
 	agwCollections, err := agwplugins.NewAgwCollections(
 		commoncol,
+		wellknown.DefaultAgwControllerName,
 		"istio-system",
 		"Kubernetes",
 	)

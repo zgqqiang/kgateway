@@ -318,6 +318,7 @@ func (s *setup) Start(ctx context.Context) error {
 
 	agwCollections, err := agwplugins.NewAgwCollections(
 		commoncol,
+		s.agwControllerName,
 		// control plane system namespace (default is kgateway-system)
 		namespaces.GetPodNamespace(),
 		istioClient.ClusterID().String(),
