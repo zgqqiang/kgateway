@@ -31,7 +31,7 @@ import (
 	"github.com/kgateway-dev/kgateway/v2/pkg/logging"
 	sdk "github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk"
 	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/ir"
-	"github.com/kgateway-dev/kgateway/v2/pkg/reports"
+	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/reporter"
 	"github.com/kgateway-dev/kgateway/v2/pkg/utils/kubeutils"
 )
 
@@ -76,7 +76,7 @@ func NewPlugin(ctx context.Context, commonCols *common.CommonCollections) *sdk.P
 			wellknown.InferencePoolGVK.GroupKind(): {
 				Name:     poolGroupKindName,
 				Policies: p.policies,
-				NewGatewayTranslationPass: func(ctx context.Context, t ir.GwTranslationCtx, r reports.Reporter) ir.ProxyTranslationPass {
+				NewGatewayTranslationPass: func(ctx context.Context, t ir.GwTranslationCtx, r reporter.Reporter) ir.ProxyTranslationPass {
 					return newEndpointPickerPass(r, p.podIndex)
 				},
 			},
@@ -147,13 +147,13 @@ type endpointPickerPass struct {
 	usedPools map[types.NamespacedName]*inferencePool
 	ir.UnimplementedProxyTranslationPass
 
-	reporter reports.Reporter
+	reporter reporter.Reporter
 }
 
 var _ ir.ProxyTranslationPass = &endpointPickerPass{}
 
 func newEndpointPickerPass(
-	reporter reports.Reporter,
+	reporter reporter.Reporter,
 	podIdx krt.Index[string, krtcollections.LocalityPod],
 ) ir.ProxyTranslationPass {
 	return &endpointPickerPass{

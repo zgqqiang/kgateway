@@ -15,6 +15,7 @@ import (
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/plugins"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/translator/irtranslator"
 	sdk "github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk"
+	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/reporter"
 	"github.com/kgateway-dev/kgateway/v2/pkg/reports"
 )
 
@@ -50,7 +51,7 @@ func TestFilterChains(t *testing.T) {
 		// it will be necessary; leaving it here to save time debugging after a refactor
 		ContributedPolicies: map[schema.GroupKind]sdk.PolicyPlugin{
 			addFiltersGK: {
-				NewGatewayTranslationPass: func(ctx context.Context, tctx ir.GwTranslationCtx, reporter reports.Reporter) ir.ProxyTranslationPass {
+				NewGatewayTranslationPass: func(ctx context.Context, tctx ir.GwTranslationCtx, reporter reporter.Reporter) ir.ProxyTranslationPass {
 					return addFilters{}
 				},
 			},
