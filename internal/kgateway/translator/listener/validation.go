@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	istioprotocol "istio.io/istio/pkg/config/protocol"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwxv1a1 "sigs.k8s.io/gateway-api/apisx/v1alpha1"
@@ -57,6 +58,14 @@ func getSupportedProtocolsRoutes() map[protocol]map[groupName][]routeKind {
 		},
 		string(gwv1.TLSProtocolType): {
 			gwv1.GroupName: []string{
+				wellknown.TLSRouteKind,
+			},
+		},
+		string(gwv1.ProtocolType(istioprotocol.HBONE)): {
+			gwv1.GroupName: []string{
+				wellknown.HTTPRouteKind,
+				wellknown.GRPCRouteKind,
+				wellknown.TCPRouteKind,
 				wellknown.TLSRouteKind,
 			},
 		},
