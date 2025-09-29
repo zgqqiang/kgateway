@@ -1,13 +1,11 @@
-name: Build-Envoy-ARM64（分支&Tag可输入）
+name: Build-Envoy-ARM64
 
 env:
-  # ====== 可维护版本 ======
-  ENVOY_GLOO_REF: "v1.34.0-patch0"   # envoy-gloo 版本
-  GO_VERSION: "1.24.1"               # Go 版本
-  # ========================
+  ENVOY_GLOO_REF: "v1.34.0-patch0"
+  GO_VERSION: "1.24.1"
 
 on:
-  workflow_dispatch:          # 完全手动触发
+  workflow_dispatch:
     inputs:
       ref:
         description: '上游分支或tag (例: v2.0.0 / main)'
@@ -20,10 +18,7 @@ on:
 
 jobs:
   envoy:
-    strategy:
-      matrix:
-        arch: [ ubuntu-24.04-arm ]
-    runs-on: ${{ matrix.arch }}
+    runs-on: ubuntu-24.04-arm      # ① 必须是 GitHub 官方 ARM runner 或你自建的 ARM 标签
     steps:
       - name: Checkout kgateway
         uses: actions/checkout@v4
@@ -36,10 +31,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: solo-io/envoy-gloo
-          ref: ${{ env.ENVOY_GLOO_REF }}   # ← 使用变量
+          ref: ${{ env.ENVOY_GLOO_REF }}
           path: envoy-gloo
 
-      - name: Install Go ${{ env.GO_VERSION }}
+      - name: Install Go
         run: |
           curl -L https://go.dev/dl/go${{ env.GO_VERSION }}.linux-arm64.tar.gz | sudo tar -C /usr/local -xz
           echo "/usr/local/go/bin" >> $GITHUB_PATH
@@ -48,45 +43,34 @@ jobs:
         working-directory: envoy-gloo
         run: |
           sed -i 's|x86/bin/release.tar.zst|arm64/bin/release.tar.zst|g' ci/run_envoy_docker.sh
-
-          # 3. 覆盖 Dockerfile-arm 为极简 Ubuntu 镜像
           cat > ci/Dockerfile-arm <<'EOF'
-FROM ubuntu:focal
-
-ENV loglevel=info
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && \
-    apt-get install --no-install-recommends -y ca-certificates && \
-    apt-get upgrade -y && \
-    apt-get clean && \
-    rm -rf /var/log/*log /var/lib/apt/lists/* /var/log/apt/* /var/lib/dpkg/*-old /var/cache/debconf/*-old
-
-RUN mkdir -p /etc/envoy
-ADD linux/amd64/build_envoy_release/envoy /usr/local/bin/envoy
-
-ENTRYPOINT ["/usr/local/bin/envoy"]
-CMD ["-c", "/etc/envoy/envoy.yaml"]
-EOF
+          FROM ubuntu:focal
+          ENV loglevel=info
+          ENV DEBIAN_FRONTEND=noninteractive
+          RUN apt-get update && \
+              apt-get install --no-install-recommends -y ca-certificates && \
+              apt-get upgrade -y && \
+              apt-get clean && \
+              rm -rf /var/log/*log /var/lib/apt/lists/* /var/log/apt/* /var/lib/dpkg/*-old /var/cache/debconf/*-old
+          RUN mkdir -p /etc/envoy
+          ADD linux/amd64/build_envoy_release/envoy /usr/local/bin/envoy
+          ENTRYPOINT ["/usr/local/bin/envoy"]
+          CMD ["-c", "/etc/envoy/envoy.yaml"]
+          EOF
 
       - name: Build envoy binary & capture build image name
         working-directory: envoy-gloo
         id: build
         run: |
-          # 先加载变量文件，拿到 ENVOY_BUILD_SHA
           . ci/envoy_build_sha.sh
-          IMAGE_NAME="envoyproxy/envoy-build-ubuntu"
-          IMAGE_ID="${ENVOY_BUILD_SHA}"
-          echo "build_image=${IMAGE_NAME}:${IMAGE_ID}" >> $GITHUB_OUTPUT
-
-          # 真正编译
+          echo "build_image=envoyproxy/envoy-build-ubuntu:${ENVOY_BUILD_SHA}" >> $GITHUB_OUTPUT
           make fast-build-arm
 
       - name: Docker Login
-        uses: docker/login-action@v3.4.0
+        uses: docker/login-action@v3
         with:
-            username: ${{ secrets.DOCKERHUB_USER }}
-            password: ${{ secrets.DOCKERHUB_PASSWD }}
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PASSWD }}
 
       - name: Tag & push build image
         run: |
