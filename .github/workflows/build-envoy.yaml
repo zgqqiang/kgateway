@@ -20,7 +20,10 @@ on:
 
 jobs:
   envoy:
-    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        arch: [ ubuntu-24.04-arm ]
+    runs-on: ${{ matrix.arch }}
     steps:
       - name: Checkout kgateway
         uses: actions/checkout@v4
