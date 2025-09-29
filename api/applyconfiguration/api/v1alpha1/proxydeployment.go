@@ -2,16 +2,10 @@
 
 package v1alpha1
 
-import (
-	v1 "k8s.io/api/apps/v1"
-)
-
 // ProxyDeploymentApplyConfiguration represents a declarative configuration of the ProxyDeployment type for use
 // with apply.
 type ProxyDeploymentApplyConfiguration struct {
-	Replicas     *int32                 `json:"replicas,omitempty"`
-	OmitReplicas *bool                  `json:"omitReplicas,omitempty"`
-	Strategy     *v1.DeploymentStrategy `json:"strategy,omitempty"`
+	Replicas *uint32 `json:"replicas,omitempty"`
 }
 
 // ProxyDeploymentApplyConfiguration constructs a declarative configuration of the ProxyDeployment type for use with
@@ -23,23 +17,7 @@ func ProxyDeployment() *ProxyDeploymentApplyConfiguration {
 // WithReplicas sets the Replicas field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Replicas field is set to the value of the last call.
-func (b *ProxyDeploymentApplyConfiguration) WithReplicas(value int32) *ProxyDeploymentApplyConfiguration {
+func (b *ProxyDeploymentApplyConfiguration) WithReplicas(value uint32) *ProxyDeploymentApplyConfiguration {
 	b.Replicas = &value
-	return b
-}
-
-// WithOmitReplicas sets the OmitReplicas field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the OmitReplicas field is set to the value of the last call.
-func (b *ProxyDeploymentApplyConfiguration) WithOmitReplicas(value bool) *ProxyDeploymentApplyConfiguration {
-	b.OmitReplicas = &value
-	return b
-}
-
-// WithStrategy sets the Strategy field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the Strategy field is set to the value of the last call.
-func (b *ProxyDeploymentApplyConfiguration) WithStrategy(value v1.DeploymentStrategy) *ProxyDeploymentApplyConfiguration {
-	b.Strategy = &value
 	return b
 }

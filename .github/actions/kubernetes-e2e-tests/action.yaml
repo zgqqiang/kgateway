@@ -39,7 +39,7 @@ runs:
     run: make go-test
   - name: Archive bug report directory on failure
     if: ${{ failure() }}
-    uses: ./.github/actions/upload-artifact
+    uses: actions/upload-artifact@v4
     with:
-      name: bug-report-${{ inputs.cluster-name }}-${{ inputs.matrix-label }}
+      name: bug-report-${{ inputs.cluster-name }}-${{ inputs.matrix-label }}-attempt-${{ github.run_attempt }}
       path: ./_test/bug_report/${{ inputs.cluster-name }}

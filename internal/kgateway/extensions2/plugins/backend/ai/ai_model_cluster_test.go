@@ -1,25 +1,26 @@
 package ai
 
 import (
+	"context"
 	"strings"
 	"testing"
 
-	envoyclusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	envoy_config_cluster_v3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/utils/ptr"
-	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/kgateway-dev/kgateway/v2/api/v1alpha1"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
 )
 
 func TestProcessAIBackend_Empty(t *testing.T) {
-	cluster := &envoyclusterv3.Cluster{
+	ctx := context.Background()
+	cluster := &envoy_config_cluster_v3.Cluster{
 		Name: "test-cluster",
 	}
 
-	err := ProcessAIBackend(nil, nil, nil, cluster)
+	err := ProcessAIBackend(ctx, nil, nil, nil, cluster)
 
 	assert.NoError(t, err)
 	assert.Equal(t, "test-cluster", cluster.Name)
@@ -27,18 +28,21 @@ func TestProcessAIBackend_Empty(t *testing.T) {
 }
 
 func TestProcessAIBackend_OpenAI(t *testing.T) {
-	cluster := &envoyclusterv3.Cluster{
+	ctx := context.Background()
+	cluster := &envoy_config_cluster_v3.Cluster{
 		Name: "openai-cluster",
 	}
 
 	model := "gpt-4"
 	aiBackend := &v1alpha1.AIBackend{
 		LLM: &v1alpha1.LLMProvider{
-			OpenAI: &v1alpha1.OpenAIConfig{
-				Model: &model,
-				AuthToken: v1alpha1.SingleAuthToken{
-					Kind:   v1alpha1.Inline,
-					Inline: ptr.To("test-token"),
+			Provider: v1alpha1.SupportedLLMProvider{
+				OpenAI: &v1alpha1.OpenAIConfig{
+					Model: &model,
+					AuthToken: v1alpha1.SingleAuthToken{
+						Kind:   v1alpha1.Inline,
+						Inline: ptr.To("test-token"),
+					},
 				},
 			},
 		},
@@ -47,12 +51,12 @@ func TestProcessAIBackend_OpenAI(t *testing.T) {
 	secrets := &ir.Secret{}
 	multiSecrets := map[string]*ir.Secret{}
 
-	err := ProcessAIBackend(aiBackend, secrets, multiSecrets, cluster)
+	err := ProcessAIBackend(ctx, aiBackend, secrets, multiSecrets, cluster)
 
 	require.NoError(t, err)
 
 	// Verify cluster type
-	assert.Equal(t, envoyclusterv3.Cluster_STRICT_DNS, cluster.GetType())
+	assert.Equal(t, envoy_config_cluster_v3.Cluster_STRICT_DNS, cluster.GetType())
 
 	// Verify load assignment
 	require.NotNil(t, cluster.LoadAssignment)
@@ -93,18 +97,21 @@ func TestProcessAIBackend_OpenAI(t *testing.T) {
 }
 
 func TestProcessAIBackend_Anthropic(t *testing.T) {
-	cluster := &envoyclusterv3.Cluster{
+	ctx := context.Background()
+	cluster := &envoy_config_cluster_v3.Cluster{
 		Name: "anthropic-cluster",
 	}
 
 	model := "claude-3-opus-20240229"
 	aiBackend := &v1alpha1.AIBackend{
 		LLM: &v1alpha1.LLMProvider{
-			Anthropic: &v1alpha1.AnthropicConfig{
-				Model: &model,
-				AuthToken: v1alpha1.SingleAuthToken{
-					Kind:   v1alpha1.Inline,
-					Inline: ptr.To("anthropic-token"),
+			Provider: v1alpha1.SupportedLLMProvider{
+				Anthropic: &v1alpha1.AnthropicConfig{
+					Model: &model,
+					AuthToken: v1alpha1.SingleAuthToken{
+						Kind:   v1alpha1.Inline,
+						Inline: ptr.To("anthropic-token"),
+					},
 				},
 			},
 		},
@@ -113,7 +120,7 @@ func TestProcessAIBackend_Anthropic(t *testing.T) {
 	secrets := &ir.Secret{}
 	multiSecrets := map[string]*ir.Secret{}
 
-	err := ProcessAIBackend(aiBackend, secrets, multiSecrets, cluster)
+	err := ProcessAIBackend(ctx, aiBackend, secrets, multiSecrets, cluster)
 
 	require.NoError(t, err)
 
@@ -140,19 +147,22 @@ func TestProcessAIBackend_Anthropic(t *testing.T) {
 }
 
 func TestProcessAIBackend_AzureOpenAI(t *testing.T) {
-	cluster := &envoyclusterv3.Cluster{
+	ctx := context.Background()
+	cluster := &envoy_config_cluster_v3.Cluster{
 		Name: "azure-openai-cluster",
 	}
 
 	aiBackend := &v1alpha1.AIBackend{
 		LLM: &v1alpha1.LLMProvider{
-			AzureOpenAI: &v1alpha1.AzureOpenAIConfig{
-				Endpoint:       "myendpoint.openai.azure.com",
-				DeploymentName: "gpt-4-deployment",
-				ApiVersion:     "2023-05-15",
-				AuthToken: v1alpha1.SingleAuthToken{
-					Kind:   v1alpha1.Inline,
-					Inline: ptr.To("azure-token"),
+			Provider: v1alpha1.SupportedLLMProvider{
+				AzureOpenAI: &v1alpha1.AzureOpenAIConfig{
+					Endpoint:       "myendpoint.openai.azure.com",
+					DeploymentName: "gpt-4-deployment",
+					ApiVersion:     "2023-05-15",
+					AuthToken: v1alpha1.SingleAuthToken{
+						Kind:   v1alpha1.Inline,
+						Inline: ptr.To("azure-token"),
+					},
 				},
 			},
 		},
@@ -161,7 +171,7 @@ func TestProcessAIBackend_AzureOpenAI(t *testing.T) {
 	secrets := &ir.Secret{}
 	multiSecrets := map[string]*ir.Secret{}
 
-	err := ProcessAIBackend(aiBackend, secrets, multiSecrets, cluster)
+	err := ProcessAIBackend(ctx, aiBackend, secrets, multiSecrets, cluster)
 
 	require.NoError(t, err)
 
@@ -189,18 +199,21 @@ func TestProcessAIBackend_AzureOpenAI(t *testing.T) {
 }
 
 func TestProcessAIBackend_Gemini(t *testing.T) {
-	cluster := &envoyclusterv3.Cluster{
+	ctx := context.Background()
+	cluster := &envoy_config_cluster_v3.Cluster{
 		Name: "gemini-cluster",
 	}
 
 	aiBackend := &v1alpha1.AIBackend{
 		LLM: &v1alpha1.LLMProvider{
-			Gemini: &v1alpha1.GeminiConfig{
-				Model:      "gemini-pro",
-				ApiVersion: "v1",
-				AuthToken: v1alpha1.SingleAuthToken{
-					Kind:   v1alpha1.Inline,
-					Inline: ptr.To("gemini-token"),
+			Provider: v1alpha1.SupportedLLMProvider{
+				Gemini: &v1alpha1.GeminiConfig{
+					Model:      "gemini-pro",
+					ApiVersion: "v1",
+					AuthToken: v1alpha1.SingleAuthToken{
+						Kind:   v1alpha1.Inline,
+						Inline: ptr.To("gemini-token"),
+					},
 				},
 			},
 		},
@@ -209,7 +222,7 @@ func TestProcessAIBackend_Gemini(t *testing.T) {
 	secrets := &ir.Secret{}
 	multiSecrets := map[string]*ir.Secret{}
 
-	err := ProcessAIBackend(aiBackend, secrets, multiSecrets, cluster)
+	err := ProcessAIBackend(ctx, aiBackend, secrets, multiSecrets, cluster)
 
 	require.NoError(t, err)
 
@@ -237,21 +250,24 @@ func TestProcessAIBackend_Gemini(t *testing.T) {
 }
 
 func TestProcessAIBackend_VertexAI(t *testing.T) {
-	cluster := &envoyclusterv3.Cluster{
+	ctx := context.Background()
+	cluster := &envoy_config_cluster_v3.Cluster{
 		Name: "vertex-ai-cluster",
 	}
 
 	aiBackend := &v1alpha1.AIBackend{
 		LLM: &v1alpha1.LLMProvider{
-			VertexAI: &v1alpha1.VertexAIConfig{
-				Model:      "gemini-1.5-pro",
-				ApiVersion: "v1",
-				Location:   "us-central1",
-				ProjectId:  "my-project",
-				Publisher:  v1alpha1.GOOGLE,
-				AuthToken: v1alpha1.SingleAuthToken{
-					Kind:   v1alpha1.Inline,
-					Inline: ptr.To("vertex-token"),
+			Provider: v1alpha1.SupportedLLMProvider{
+				VertexAI: &v1alpha1.VertexAIConfig{
+					Model:      "gemini-1.5-pro",
+					ApiVersion: "v1",
+					Location:   "us-central1",
+					ProjectId:  "my-project",
+					Publisher:  v1alpha1.GOOGLE,
+					AuthToken: v1alpha1.SingleAuthToken{
+						Kind:   v1alpha1.Inline,
+						Inline: ptr.To("vertex-token"),
+					},
 				},
 			},
 		},
@@ -260,7 +276,7 @@ func TestProcessAIBackend_VertexAI(t *testing.T) {
 	secrets := &ir.Secret{}
 	multiSecrets := map[string]*ir.Secret{}
 
-	err := ProcessAIBackend(aiBackend, secrets, multiSecrets, cluster)
+	err := ProcessAIBackend(ctx, aiBackend, secrets, multiSecrets, cluster)
 
 	require.NoError(t, err)
 
@@ -290,29 +306,26 @@ func TestProcessAIBackend_VertexAI(t *testing.T) {
 	assert.Equal(t, "google", filterMeta.Fields["publisher"].GetStringValue())
 }
 
-func TestProcessAIBackend_CustomURL(t *testing.T) {
-	cluster := &envoyclusterv3.Cluster{
+func TestProcessAIBackend_CustomHost(t *testing.T) {
+	ctx := context.Background()
+	cluster := &envoy_config_cluster_v3.Cluster{
 		Name: "custom-host-cluster",
 	}
 
 	model := "gpt-4"
-	path := "/api/v1/chat/completions"
-	prefix := "Bearer"
-	header := "Authorization"
 	aiBackend := &v1alpha1.AIBackend{
 		LLM: &v1alpha1.LLMProvider{
-			Host: ptr.To("custom-openai-host.example.com"),
-			Port: ptr.To(gwv1.PortNumber(8443)),
-			Path: &v1alpha1.PathOverride{Full: &path},
-			AuthHeader: &v1alpha1.AuthHeader{
-				Prefix:     &prefix,
-				HeaderName: &header,
+			HostOverride: &v1alpha1.Host{
+				Host: "custom-openai-host.example.com",
+				Port: 8443,
 			},
-			OpenAI: &v1alpha1.OpenAIConfig{
-				Model: &model,
-				AuthToken: v1alpha1.SingleAuthToken{
-					Kind:   v1alpha1.Inline,
-					Inline: ptr.To("test-token"),
+			Provider: v1alpha1.SupportedLLMProvider{
+				OpenAI: &v1alpha1.OpenAIConfig{
+					Model: &model,
+					AuthToken: v1alpha1.SingleAuthToken{
+						Kind:   v1alpha1.Inline,
+						Inline: ptr.To("test-token"),
+					},
 				},
 			},
 		},
@@ -321,7 +334,7 @@ func TestProcessAIBackend_CustomURL(t *testing.T) {
 	secrets := &ir.Secret{}
 	multiSecrets := map[string]*ir.Secret{}
 
-	err := ProcessAIBackend(aiBackend, secrets, multiSecrets, cluster)
+	err := ProcessAIBackend(ctx, aiBackend, secrets, multiSecrets, cluster)
 
 	require.NoError(t, err)
 
@@ -341,7 +354,8 @@ func TestProcessAIBackend_CustomURL(t *testing.T) {
 }
 
 func TestProcessAIBackend_MultiPool(t *testing.T) {
-	cluster := &envoyclusterv3.Cluster{
+	ctx := context.Background()
+	cluster := &envoy_config_cluster_v3.Cluster{
 		Name: "multi-pool-cluster",
 	}
 
@@ -350,33 +364,33 @@ func TestProcessAIBackend_MultiPool(t *testing.T) {
 	model2 := "gpt-3.5-turbo"
 
 	aiBackend := &v1alpha1.AIBackend{
-		PriorityGroups: []v1alpha1.PriorityGroup{
-			{
-				Providers: []v1alpha1.NamedLLMProvider{
-					{
-						Name: "openai-primary",
-						LLMProvider: v1alpha1.LLMProvider{
-							OpenAI: &v1alpha1.OpenAIConfig{
-								Model: &model1,
-								AuthToken: v1alpha1.SingleAuthToken{
-									Kind:   v1alpha1.Inline,
-									Inline: ptr.To("primary-token"),
+		MultiPool: &v1alpha1.MultiPoolConfig{
+			Priorities: []v1alpha1.Priority{
+				{
+					Pool: []v1alpha1.LLMProvider{
+						{
+							Provider: v1alpha1.SupportedLLMProvider{
+								OpenAI: &v1alpha1.OpenAIConfig{
+									Model: &model1,
+									AuthToken: v1alpha1.SingleAuthToken{
+										Kind:   v1alpha1.Inline,
+										Inline: ptr.To("primary-token"),
+									},
 								},
 							},
 						},
 					},
 				},
-			},
-			{
-				Providers: []v1alpha1.NamedLLMProvider{
-					{
-						Name: "openai-fallback",
-						LLMProvider: v1alpha1.LLMProvider{
-							OpenAI: &v1alpha1.OpenAIConfig{
-								Model: &model2,
-								AuthToken: v1alpha1.SingleAuthToken{
-									Kind:   v1alpha1.Inline,
-									Inline: ptr.To("fallback-token"),
+				{
+					Pool: []v1alpha1.LLMProvider{
+						{
+							Provider: v1alpha1.SupportedLLMProvider{
+								OpenAI: &v1alpha1.OpenAIConfig{
+									Model: &model2,
+									AuthToken: v1alpha1.SingleAuthToken{
+										Kind:   v1alpha1.Inline,
+										Inline: ptr.To("fallback-token"),
+									},
 								},
 							},
 						},
@@ -389,7 +403,7 @@ func TestProcessAIBackend_MultiPool(t *testing.T) {
 	secrets := &ir.Secret{}
 	multiSecrets := map[string]*ir.Secret{}
 
-	err := ProcessAIBackend(aiBackend, secrets, multiSecrets, cluster)
+	err := ProcessAIBackend(ctx, aiBackend, secrets, multiSecrets, cluster)
 
 	require.NoError(t, err)
 
@@ -428,7 +442,7 @@ func TestProcessAIBackend_MultiPool(t *testing.T) {
 }
 
 // findTransportSocketMatchByPrefix finds a transport socket match with a name starting with prefix
-func findTransportSocketMatchByPrefix(matches []*envoyclusterv3.Cluster_TransportSocketMatch, prefix string) *envoyclusterv3.Cluster_TransportSocketMatch {
+func findTransportSocketMatchByPrefix(matches []*envoy_config_cluster_v3.Cluster_TransportSocketMatch, prefix string) *envoy_config_cluster_v3.Cluster_TransportSocketMatch {
 	for _, match := range matches {
 		if strings.HasPrefix(match.Name, prefix) {
 			return match
@@ -438,7 +452,7 @@ func findTransportSocketMatchByPrefix(matches []*envoyclusterv3.Cluster_Transpor
 }
 
 // findTransportSocketMatchByName finds a transport socket match with exact name
-func findTransportSocketMatchByName(matches []*envoyclusterv3.Cluster_TransportSocketMatch, name string) *envoyclusterv3.Cluster_TransportSocketMatch {
+func findTransportSocketMatchByName(matches []*envoy_config_cluster_v3.Cluster_TransportSocketMatch, name string) *envoy_config_cluster_v3.Cluster_TransportSocketMatch {
 	for _, match := range matches {
 		if match.Name == name {
 			return match

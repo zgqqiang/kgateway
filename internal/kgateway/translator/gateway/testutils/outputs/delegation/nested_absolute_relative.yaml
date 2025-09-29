@@ -1,58 +1,9 @@
-Clusters:
-- connectTimeout: 5s
-  edsClusterConfig:
-    edsConfig:
-      ads: {}
-      resourceApiVersion: V3
-  ignoreHealthOnHostRemoval: true
-  metadata: {}
-  name: kube_a-b-d_svc-a-b-d_8080
-  type: EDS
-- connectTimeout: 5s
-  edsClusterConfig:
-    edsConfig:
-      ads: {}
-      resourceApiVersion: V3
-  ignoreHealthOnHostRemoval: true
-  metadata: {}
-  name: kube_a-b_svc-a-b_8080
-  type: EDS
-- connectTimeout: 5s
-  edsClusterConfig:
-    edsConfig:
-      ads: {}
-      resourceApiVersion: V3
-  ignoreHealthOnHostRemoval: true
-  metadata: {}
-  name: kube_a_svc-a_8080
-  type: EDS
-- connectTimeout: 5s
-  edsClusterConfig:
-    edsConfig:
-      ads: {}
-      resourceApiVersion: V3
-  ignoreHealthOnHostRemoval: true
-  metadata: {}
-  name: kube_b_svc-b_8080
-  type: EDS
-- connectTimeout: 5s
-  edsClusterConfig:
-    edsConfig:
-      ads: {}
-      resourceApiVersion: V3
-  ignoreHealthOnHostRemoval: true
-  metadata: {}
-  name: kube_infra_example-svc_80
-  type: EDS
-- connectTimeout: 5s
-  metadata: {}
-  name: test-backend-plugin_default_example-svc_80
 Listeners:
 - address:
     socketAddress:
       address: '::'
       ipv4Compat: true
-      portValue: 80
+      portValue: 8080
   filterChains:
   - filters:
     - name: envoy.filters.network.http_connection_manager
@@ -68,33 +19,29 @@ Listeners:
           configSource:
             ads: {}
             resourceApiVersion: V3
-          routeConfigName: listener~80
+          routeConfigName: http
         statPrefix: http
-        useRemoteAddress: true
-    name: listener~80
-  name: listener~80
+        use_remote_address: true
+    name: http
+  name: http
 Routes:
 - ignorePortInHostMatching: true
-  name: listener~80
+  name: http
   virtualHosts:
   - domains:
     - example.com
-    name: listener~80~example_com
+    name: http~example_com
     routes:
     - match:
         headers:
-        - name: parent-header
-          stringMatch:
-            exact: parent-header-val
-        - name: route-a-b-header-2
-          stringMatch:
-            exact: route-a-b-header-val-2
-        - name: route-a-b-d-header
-          stringMatch:
-            exact: route-a-b-d-header-val
-        - name: :method
-          stringMatch:
-            exact: GET
+        - exactMatch: parent-header-val
+          name: parent-header
+        - exactMatch: route-a-b-header-val-2
+          name: route-a-b-header-2
+        - exactMatch: route-a-b-d-header-val
+          name: route-a-b-d-header
+        - exactMatch: GET
+          name: :method
         pathSeparatedPrefix: /a/b/d/1
         queryParameters:
         - name: parent-query
@@ -106,21 +53,18 @@ Routes:
         - name: route-a-b-d-query
           stringMatch:
             exact: route-a-b-d-query-val
-      name: listener~80~example_com-route-0-httproute-route-a-b-d-a-b-d-0-0-matcher-0
+      name: http~example_com-route-0-httproute-route-a-b-d-a-b-d-0-0-matcher-0
       route:
         cluster: kube_a-b-d_svc-a-b-d_8080
         clusterNotFoundResponseCode: INTERNAL_SERVER_ERROR
     - match:
         headers:
-        - name: parent-header
-          stringMatch:
-            exact: parent-header-val
-        - name: route-a-b-header
-          stringMatch:
-            exact: route-a-b-header-val
-        - name: :method
-          stringMatch:
-            exact: GET
+        - exactMatch: parent-header-val
+          name: parent-header
+        - exactMatch: route-a-b-header-val
+          name: route-a-b-header
+        - exactMatch: GET
+          name: :method
         pathSeparatedPrefix: /a/b/c
         queryParameters:
         - name: parent-query
@@ -129,18 +73,16 @@ Routes:
         - name: route-a-b-query
           stringMatch:
             exact: route-a-b-query-val
-      name: listener~80~example_com-route-1-httproute-route-a-b-a-b-0-0-matcher-0
+      name: http~example_com-route-1-httproute-route-a-b-a-b-0-0-matcher-0
       route:
         cluster: kube_a-b_svc-a-b_8080
         clusterNotFoundResponseCode: INTERNAL_SERVER_ERROR
     - match:
         headers:
-        - name: parent-header
-          stringMatch:
-            exact: parent-header-val
-        - name: route-a-header
-          stringMatch:
-            exact: route-a-header-val
+        - exactMatch: parent-header-val
+          name: parent-header
+        - exactMatch: route-a-header-val
+          name: route-a-header
         pathSeparatedPrefix: /a/1
         queryParameters:
         - name: parent-query
@@ -149,131 +91,7 @@ Routes:
         - name: route-a-query
           stringMatch:
             exact: route-a-query-val
-      name: listener~80~example_com-route-4-httproute-route-a-a-0-0-matcher-0
+      name: http~example_com-route-4-httproute-route-a-a-0-0-matcher-0
       route:
         cluster: kube_a_svc-a_8080
         clusterNotFoundResponseCode: INTERNAL_SERVER_ERROR
-Statuses:
-  gateways:
-    infra/example-gateway:
-      conditions:
-      - lastTransitionTime: null
-        message: ""
-        reason: ListenerSetsNotAllowed
-        status: Unknown
-        type: AttachedListenerSets
-      - lastTransitionTime: null
-        message: Gateway is accepted
-        reason: Accepted
-        status: "True"
-        type: Accepted
-      - lastTransitionTime: null
-        message: Gateway is programmed
-        reason: Programmed
-        status: "True"
-        type: Programmed
-      listeners:
-      - attachedRoutes: 1
-        conditions:
-        - lastTransitionTime: null
-          message: Listener is accepted
-          reason: Accepted
-          status: "True"
-          type: Accepted
-        - lastTransitionTime: null
-          message: Listener does not have conflicts
-          reason: NoConflicts
-          status: "False"
-          type: Conflicted
-        - lastTransitionTime: null
-          message: Listener has valid refs
-          reason: ResolvedRefs
-          status: "True"
-          type: ResolvedRefs
-        - lastTransitionTime: null
-          message: Listener is programmed
-          reason: Programmed
-          status: "True"
-          type: Programmed
-        name: http
-        supportedKinds:
-        - group: gateway.networking.k8s.io
-          kind: HTTPRoute
-        - group: gateway.networking.k8s.io
-          kind: GRPCRoute
-  httpRoutes:
-    a-b-d/route-a-b-d:
-      parents:
-      - conditions:
-        - lastTransitionTime: null
-          message: Route is accepted
-          reason: Accepted
-          status: "True"
-          type: Accepted
-        - lastTransitionTime: null
-          message: Route has valid refs
-          reason: ResolvedRefs
-          status: "True"
-          type: ResolvedRefs
-        controllerName: kgateway
-        parentRef:
-          group: gateway.networking.k8s.io
-          kind: HTTPRoute
-          name: route-a-b
-          namespace: a-b
-    a-b/route-a-b:
-      parents:
-      - conditions:
-        - lastTransitionTime: null
-          message: Route is accepted
-          reason: Accepted
-          status: "True"
-          type: Accepted
-        - lastTransitionTime: null
-          message: Route has valid refs
-          reason: ResolvedRefs
-          status: "True"
-          type: ResolvedRefs
-        controllerName: kgateway
-        parentRef:
-          group: gateway.networking.k8s.io
-          kind: HTTPRoute
-          name: route-a
-          namespace: a
-    a/route-a:
-      parents:
-      - conditions:
-        - lastTransitionTime: null
-          message: Route is accepted
-          reason: Accepted
-          status: "True"
-          type: Accepted
-        - lastTransitionTime: null
-          message: Route has valid refs
-          reason: ResolvedRefs
-          status: "True"
-          type: ResolvedRefs
-        controllerName: kgateway
-        parentRef:
-          group: gateway.networking.k8s.io
-          kind: HTTPRoute
-          name: example-route
-          namespace: infra
-    infra/example-route:
-      parents:
-      - conditions:
-        - lastTransitionTime: null
-          message: Route is accepted
-          reason: Accepted
-          status: "True"
-          type: Accepted
-        - lastTransitionTime: null
-          message: Route has valid refs
-          reason: ResolvedRefs
-          status: "True"
-          type: ResolvedRefs
-        controllerName: kgateway
-        parentRef:
-          group: ""
-          kind: ""
-          name: example-gateway

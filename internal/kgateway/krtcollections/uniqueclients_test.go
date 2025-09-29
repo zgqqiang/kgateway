@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	envoycorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	envoy_service_discovery_v3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
@@ -19,9 +19,9 @@ import (
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
 	. "github.com/kgateway-dev/kgateway/v2/internal/kgateway/krtcollections"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/utils"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/utils/krtutil"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/wellknown"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/xds"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/krtutil"
 )
 
 func TestUniqueClients(t *testing.T) {
@@ -57,7 +57,7 @@ func TestUniqueClients(t *testing.T) {
 			},
 			requests: []*envoy_service_discovery_v3.DiscoveryRequest{
 				{
-					Node: &envoycorev3.Node{
+					Node: &corev3.Node{
 						Id: "podname.ns",
 						Metadata: &structpb.Struct{
 							Fields: map[string]*structpb.Value{
@@ -71,7 +71,6 @@ func TestUniqueClients(t *testing.T) {
 				fmt.Sprintf("kgateway-kube-gateway-api~best-proxy-role~%d~ns", utils.HashLabels(map[string]string{
 					corev1.LabelTopologyRegion: "region",
 					corev1.LabelTopologyZone:   "zone",
-					corev1.LabelHostname:       "node",
 					"a":                        "b",
 				})),
 			),
@@ -122,7 +121,7 @@ func TestUniqueClients(t *testing.T) {
 			},
 			requests: []*envoy_service_discovery_v3.DiscoveryRequest{
 				{
-					Node: &envoycorev3.Node{
+					Node: &corev3.Node{
 						Id: "podname.ns",
 						Metadata: &structpb.Struct{
 							Fields: map[string]*structpb.Value{
@@ -132,7 +131,7 @@ func TestUniqueClients(t *testing.T) {
 					},
 				},
 				{
-					Node: &envoycorev3.Node{
+					Node: &corev3.Node{
 						Id: "podname2.ns",
 						Metadata: &structpb.Struct{
 							Fields: map[string]*structpb.Value{
@@ -146,12 +145,10 @@ func TestUniqueClients(t *testing.T) {
 				fmt.Sprintf("kgateway-kube-gateway-api~best-proxy-role~%d~ns", utils.HashLabels(map[string]string{
 					corev1.LabelTopologyRegion: "region",
 					corev1.LabelTopologyZone:   "zone",
-					corev1.LabelHostname:       "node",
 					"a":                        "b",
 				})), fmt.Sprintf("kgateway-kube-gateway-api~best-proxy-role~%d~ns", utils.HashLabels(map[string]string{
 					corev1.LabelTopologyRegion: "region2",
 					corev1.LabelTopologyZone:   "zone2",
-					corev1.LabelHostname:       "node2",
 					"a":                        "b",
 				})),
 			),
@@ -161,7 +158,7 @@ func TestUniqueClients(t *testing.T) {
 			inputs: nil,
 			requests: []*envoy_service_discovery_v3.DiscoveryRequest{
 				{
-					Node: &envoycorev3.Node{
+					Node: &corev3.Node{
 						Id: "podname.ns",
 						Metadata: &structpb.Struct{
 							Fields: map[string]*structpb.Value{
@@ -188,7 +185,7 @@ func TestUniqueClients(t *testing.T) {
 				pods.WaitUntilSynced(context.Background().Done())
 			}
 
-			cb, uccBuilder := NewUniquelyConnectedClients(nil)
+			cb, uccBuilder := NewUniquelyConnectedClients()
 			ucc := uccBuilder(context.Background(), krtutil.KrtOptions{}, pods)
 			ucc.WaitUntilSynced(context.Background().Done())
 

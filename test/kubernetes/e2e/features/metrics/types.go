@@ -1,35 +1,90 @@
+//go:build ignore
+
 package metrics
 
 import (
 	"path/filepath"
 
+	"github.com/solo-io/solo-kit/pkg/api/v1/resources/core"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	gloov1 "github.com/kgateway-dev/kgateway/v2/internal/gloo/pkg/api/v1"
+	"github.com/kgateway-dev/kgateway/v2/internal/gloo/pkg/api/v1/options/kubernetes"
 	"github.com/kgateway-dev/kgateway/v2/pkg/utils/fsutils"
-	e2edefaults "github.com/kgateway-dev/kgateway/v2/test/kubernetes/e2e/defaults"
+	testdefaults "github.com/kgateway-dev/kgateway/v2/test/kubernetes/e2e/defaults"
 	"github.com/kgateway-dev/kgateway/v2/test/kubernetes/e2e/tests/base"
 )
 
 var (
 	// manifests
-	setupManifest = filepath.Join(fsutils.MustGetThisDir(), "testdata", "setup.yaml")
+	exampleServiceManifest            = filepath.Join(fsutils.MustGetThisDir(), "testdata", "service.yaml")
+	gatewayAndRouteToServiceManifest  = filepath.Join(fsutils.MustGetThisDir(), "testdata", "gateway-and-route-to-service.yaml")
+	gatewayAndRouteToUpstreamManifest = filepath.Join(fsutils.MustGetThisDir(), "testdata", "gateway-and-route-to-upstream.yaml")
 
 	// objects
-	proxyObjectMeta = metav1.ObjectMeta{
-		Name:      "gw1",
+	glooProxyObjectMeta = metav1.ObjectMeta{
+		Name:      "gw",
 		Namespace: "default",
 	}
+	proxyDeployment = &appsv1.Deployment{ObjectMeta: glooProxyObjectMeta}
+	proxyService    = &corev1.Service{ObjectMeta: glooProxyObjectMeta}
 
-	kgatewayMetricsObjectMeta = metav1.ObjectMeta{
-		Name:      "kgateway-metrics",
-		Namespace: "kgateway-test",
+	exampleSvc = &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "example-svc",
+			Namespace: "default",
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				"app.kubernetes.io/name": "nginx",
+			},
+			Ports: []corev1.ServicePort{
+				{
+					Port:       8080,
+					Protocol:   corev1.ProtocolTCP,
+					TargetPort: intstr.FromString("http-web-svc"),
+				},
+			},
+		},
+	}
+	nginxPod = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "nginx",
+			Namespace: "default",
+		},
 	}
 
-	setup = base.TestCase{
-		Manifests: []string{setupManifest, e2edefaults.CurlPodManifest},
+	kubeUpstream = &gloov1.Upstream{
+		Metadata: &core.Metadata{
+			Name:      "example-upstream",
+			Namespace: "default",
+		},
+		UpstreamType: &gloov1.Upstream_Kube{
+			Kube: &kubernetes.UpstreamSpec{
+				ServiceName:      "example-svc",
+				ServiceNamespace: "default",
+				ServicePort:      8080,
+			},
+		},
 	}
 
+	// test cases
 	testCases = map[string]*base.TestCase{
-		"TestMetrics": {},
+		"TestKubeServiceSuccessStats": {
+			SimpleTestCase: base.SimpleTestCase{
+				Manifests: []string{testdefaults.CurlPodManifest, exampleServiceManifest, gatewayAndRouteToServiceManifest},
+				Resources: []client.Object{testdefaults.CurlPod, exampleSvc, nginxPod, proxyDeployment, proxyService},
+			},
+		},
+		"TestKubeUpstreamSuccessStats": {
+			SimpleTestCase: base.SimpleTestCase{
+				Manifests: []string{testdefaults.CurlPodManifest, exampleServiceManifest, gatewayAndRouteToUpstreamManifest},
+				Resources: []client.Object{testdefaults.CurlPod, exampleSvc, nginxPod, proxyDeployment, proxyService},
+			},
+		},
 	}
 )

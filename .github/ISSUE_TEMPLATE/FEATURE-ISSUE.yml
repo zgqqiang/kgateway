@@ -1,6 +1,6 @@
 name: Feature Request
 description: Suggest an idea for this project
-type: Feature
+labels: ["Type: Enhancement"]
 body:
   - type: markdown
     attributes:
@@ -11,7 +11,7 @@ body:
     attributes:
       label: kgateway version
       description: What version of kgateway are you using? Please specify a specific patch version
-      placeholder: eg v2.0.2
+      placeholder: eg v1.14.2
     validations:
       required: true
   - type: textarea

@@ -19,7 +19,6 @@ clusters:
     edsConfig:
       ads: {}
       resourceApiVersion: V3
-  ignoreHealthOnHostRemoval: true
   metadata: {}
   name: kube_default_kubernetes_443
   type: EDS
@@ -126,22 +125,22 @@ listeners:
           configSource:
             ads: {}
             resourceApiVersion: V3
-          routeConfigName: listener~8080
+          routeConfigName: http
         statPrefix: http
         useRemoteAddress: true
-    name: listener~8080
-  name: listener~8080
+    name: http
+  name: http
 routes:
 - ignorePortInHostMatching: true
-  name: listener~8080
+  name: http
   virtualHosts:
   - domains:
     - test
-    name: listener~8080~test
+    name: http~test
     routes:
     - match:
         pathSeparatedPrefix: /openai
-      name: listener~8080~test-route-0-httproute-route-to-backend-gwtest-0-0-matcher-0
+      name: http~test-route-0-httproute-route-to-backend-gwtest-0-0-matcher-0
       route:
         autoHostRewrite: true
         cluster: backend_gwtest_openai_0

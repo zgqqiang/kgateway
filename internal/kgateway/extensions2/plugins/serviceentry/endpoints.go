@@ -11,14 +11,22 @@ import (
 	networkingclient "istio.io/client-go/pkg/apis/networking/v1"
 	"istio.io/istio/pkg/kube/krt"
 
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	"github.com/solo-io/go-utils/contextutils"
+
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/endpoints"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/krtcollections"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/krtutil"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/utils/krtutil"
 )
 
-// buildInlineEndpoints creates a static EndpointsForBackend for non-EDS a ServiceEntry using
-// the inline endpoints (or hosts field for DNS resolution without endpoints).
-func (s *serviceEntryPlugin) buildInlineEndpoints(ctx context.Context, be ir.BackendObjectIR, se *networkingclient.ServiceEntry) *ir.EndpointsForBackend {
+// buildInlineCLA creates a CLA for non-EDS ServiceEntry.
+// TODO it would be nice to re-use the EndpointsForBackend collection to handle this.
+// rather than doing it as part of `initBackend` which doesn't have a way to apply
+// DestinationRule (or any per-client policy) properly.
+func buildInlineCLA(ctx context.Context, be ir.BackendObjectIR, se *networkingclient.ServiceEntry) *endpointv3.ClusterLoadAssignment {
+	logger := contextutils.LoggerFrom(ctx)
+
 	var inlineWorkloads []selectedWorkload
 	for i, e := range se.Spec.GetEndpoints() {
 		converted := selectedWorkloadFromEntry(
@@ -50,14 +58,16 @@ func (s *serviceEntryPlugin) buildInlineEndpoints(ctx context.Context, be ir.Bac
 	if endpointsForBackend == nil {
 		// this is pretty much impossible, but `ir.NewEndpointsForBackend(be)`
 		// returns a pointer, so this is for safety
-		s.logger.Error("unresolved endpoints for ServiceEntry", "resource_ref", krt.NewNamed(se).ResourceName())
+		logger.DPanicw("buildInlineCLA for ServiceEntry had nil endpointsForBackend", "ServiceEntry", krt.NewNamed(se).ResourceName())
 		return nil
 	}
 
-	// Set the traffic distribution for the endpoints based on the one specified in the backend
-	endpointsForBackend.TrafficDistribution = be.TrafficDistribution
-
-	return endpointsForBackend
+	return endpoints.PrioritizeEndpoints(
+		logger.Desugar(),
+		nil,
+		*endpointsForBackend,
+		ir.UniqlyConnectedClient{},
+	)
 }
 
 func endpointsCollection(
@@ -102,7 +112,7 @@ func endpointsFromWorkloads(
 	// generated from the ServiceEntry iteself
 	var servicePort *networking.ServicePort
 	for _, sp := range se.Spec.GetPorts() {
-		if int32(sp.GetNumber()) == be.Port { //nolint:gosec // G115: ServiceEntry port numbers are always valid port range (1-65535)
+		if int32(sp.GetNumber()) == be.Port {
 			servicePort = sp
 			break
 		}
@@ -110,21 +120,20 @@ func endpointsFromWorkloads(
 
 	seTargetPort := be.Port
 	if sePortTargetPort := servicePort.GetTargetPort(); sePortTargetPort > 0 {
-		seTargetPort = int32(sePortTargetPort) //nolint:gosec // G115: ServiceEntry target port numbers are always valid port range (1-65535)
+		seTargetPort = int32(sePortTargetPort)
 	}
 
 	eps := ir.NewEndpointsForBackend(be)
 	for _, workload := range workloads {
 		address := workload.Address()
+		if address == "" {
+			continue
+		}
 
 		// for static, it must be an IP
 		// for DNS it can be IP or hostname
 		if se.Spec.GetResolution() == networking.ServiceEntry_STATIC {
-			// allow empty address workloads that have a network specificed
-			// so that endpoint plugins can process them.
-			// if they reach the ClusterLoadAssignment generation code with no
-			// address (post-plugins) then we will filter them there
-			if net.ParseIP(address) == nil && workload.network == "" {
+			if net.ParseIP(address) == nil {
 				continue
 			}
 		}
@@ -136,7 +145,7 @@ func endpointsFromWorkloads(
 		allowAutoMTLS := se.Spec.GetLocation() == networking.ServiceEntry_MESH_INTERNAL
 
 		ep := ir.EndpointWithMd{
-			LbEndpoint: krtcollections.CreateLBEndpoint(address, uint32(epPort), workload.AugmentedLabels, allowAutoMTLS), //nolint:gosec // G115: epPort is derived from valid port numbers
+			LbEndpoint: krtcollections.CreateLBEndpoint(address, uint32(epPort), workload.AugmentedLabels, allowAutoMTLS),
 			EndpointMd: ir.EndpointMetadata{
 				Labels: workload.AugmentedLabels,
 			},

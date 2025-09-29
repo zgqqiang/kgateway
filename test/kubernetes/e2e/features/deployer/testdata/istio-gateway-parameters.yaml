@@ -28,8 +28,8 @@ spec:
     - "example.com"
   rules:
     - backendRefs:
-        - name: httpbin
-          port: 8000
+        - name: nginx
+          port: 8080
 ---
 apiVersion: gateway.kgateway.dev/v1alpha1
 kind: GatewayParameters

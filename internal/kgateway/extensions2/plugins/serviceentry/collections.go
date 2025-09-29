@@ -1,9 +1,12 @@
 package serviceentry
 
 import (
-	"log/slog"
+	"context"
+	"strconv"
 	"strings"
 
+	"github.com/solo-io/go-utils/contextutils"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 	"istio.io/api/label"
 	"istio.io/istio/pkg/config/schema/gvr"
@@ -13,18 +16,15 @@ import (
 	"istio.io/istio/pkg/kube/kubetypes"
 	"istio.io/istio/pkg/slices"
 
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/common"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/krtcollections"
+
 	networking "istio.io/api/networking/v1alpha3"
 	networkingclient "istio.io/client-go/pkg/apis/networking/v1"
 	"istio.io/istio/pkg/maps"
 
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/krtcollections"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/collections"
-	krtpkg "github.com/kgateway-dev/kgateway/v2/pkg/utils/krtutil"
-
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 // wrapper around ServiceEntry that allows using FilterSelect and
@@ -42,6 +42,19 @@ var (
 // serviceEntryKey keys ServiceEntry on its name and namespace
 func serviceEntryKey(obj ir.Namespaced) string {
 	return obj.GetNamespace() + "/" + obj.GetName()
+}
+
+// hostPortKey attempts to ensure usage of makeHostPortKey for querying
+// indexes of backend by host and port.
+type hostPortKey string
+
+func (h hostPortKey) String() string {
+	return string(h)
+}
+
+// makeHostPortKey keys backends on the host and port.
+func makeHostPortKey(host string, port int) hostPortKey {
+	return hostPortKey(host + "/" + strconv.Itoa(port))
 }
 
 func (s seSelector) ResourceName() string {
@@ -66,7 +79,7 @@ func (s seSelector) Equals(in seSelector) bool {
 	return metaEqual && proto.Equal(&s.ServiceEntry.Spec, &in.ServiceEntry.Spec)
 }
 
-// selectedWorkload adds the following to Pods:
+// selectedWorkload adds the following to LocalityPod:
 // * fields specific to workload entry (portMapping, network, weight)
 // * selectedBy pointers to the selecting ServiceEntries
 // Usable with FilterSelect
@@ -89,7 +102,7 @@ func (sw selectedWorkload) mapPort(name string, defalutValue int32) int32 {
 		return defalutValue
 	}
 	if override := sw.portMapping[name]; override > 0 {
-		return int32(override) //nolint:gosec // G115: port numbers are always in valid range (1-65535)
+		return int32(override)
 	}
 	return defalutValue
 }
@@ -101,33 +114,38 @@ func (sw selectedWorkload) Equals(o selectedWorkload) bool {
 		maps.Equal(sw.portMapping, o.portMapping)
 }
 
-type serviceEntryPlugin struct {
-	logger *slog.Logger
+type serviceEntryCollections struct {
+	logger *zap.SugaredLogger
 
 	// core inputs
 	ServiceEntries  krt.Collection[*networkingclient.ServiceEntry]
 	WorkloadEntries krt.Collection[*networkingclient.WorkloadEntry]
 
 	// intermediate collections
-	SelectingServiceEntries krt.Collection[seSelector]
-	SelectedWorkloads       krt.Collection[selectedWorkload]
-	selectedWorkloadsIndex  krt.Index[string, selectedWorkload]
+	SelectedWorkloads      krt.Collection[selectedWorkload]
+	selectedWorkloadsIndex krt.Index[string, selectedWorkload]
 
 	// output collections
-	Backends  krt.Collection[ir.BackendObjectIR]
-	Endpoints krt.Collection[ir.EndpointsForBackend]
+	Backends            krt.Collection[ir.BackendObjectIR]
+	Endpoints           krt.Collection[ir.EndpointsForBackend]
+	backendsByHostPort  krt.Index[hostPortKey, ir.BackendObjectIR]
+	backendsBySourceObj krt.Index[string, ir.BackendObjectIR]
 }
 
 func initServiceEntryCollections(
-	commonCols *collections.CommonCollections,
-	opts Options,
-) serviceEntryPlugin {
+	ctx context.Context,
+	commonCols *common.CommonCollections,
+) serviceEntryCollections {
+	logger := contextutils.LoggerFrom(ctx).Named("serviceentry")
+
 	// setup input collections
+	defaultFilter := kclient.Filter{ObjectFilter: commonCols.Client.ObjectFilter()}
+
 	weInformer := kclient.NewDelayedInformer[*networkingclient.WorkloadEntry](
 		commonCols.Client,
 		gvr.WorkloadEntry,
 		kubetypes.StandardInformer,
-		kclient.Filter{ObjectFilter: commonCols.Client.ObjectFilter()},
+		defaultFilter,
 	)
 	WorkloadEntries := krt.WrapClient(weInformer, commonCols.KrtOpts.ToOptions("WorkloadEntries")...)
 
@@ -138,37 +156,43 @@ func initServiceEntryCollections(
 	SelectedWorkloads, selectedWorkloadsIndex := selectedWorkloads(
 		SelectingServiceEntries,
 		WorkloadEntries,
-		commonCols.LocalityPods,
-		opts.Aliaser,
+		commonCols.Pods,
 	)
 
 	// init the outputs
-	Backends := backendsCollections(logger, commonCols.ServiceEntries, commonCols.KrtOpts, opts.Aliaser)
+	Backends := backendsCollections(logger, commonCols.ServiceEntries, commonCols.KrtOpts)
 	Endpoints := endpointsCollection(Backends, SelectedWorkloads, selectedWorkloadsIndex, commonCols.KrtOpts)
+	backendsByHostPort := krt.NewIndex(Backends, func(be ir.BackendObjectIR) []hostPortKey {
+		return []hostPortKey{makeHostPortKey(be.CanonicalHostname, int(be.Port))}
+	})
+	// TODO this is part of the hackaround for SE backends being se*hosts*ports.
+	backendsBySourceObj := krt.NewIndex(Backends, func(be ir.BackendObjectIR) []string {
+		return []string{serviceEntryKey(be.ObjectSource)}
+	})
 
-	return serviceEntryPlugin{
-		logger: logger,
+	return serviceEntryCollections{
+		logger: contextutils.LoggerFrom(ctx),
 
 		ServiceEntries:  commonCols.ServiceEntries,
 		WorkloadEntries: WorkloadEntries,
 
-		SelectingServiceEntries: SelectingServiceEntries,
-		SelectedWorkloads:       SelectedWorkloads,
-		selectedWorkloadsIndex:  selectedWorkloadsIndex,
+		SelectedWorkloads:      SelectedWorkloads,
+		selectedWorkloadsIndex: selectedWorkloadsIndex,
 
-		Backends:  Backends,
-		Endpoints: Endpoints,
+		Backends:            Backends,
+		Endpoints:           Endpoints,
+		backendsByHostPort:  backendsByHostPort,
+		backendsBySourceObj: backendsBySourceObj,
 	}
 }
 
-func (s *serviceEntryPlugin) HasSynced() bool {
+func (s *serviceEntryCollections) HasSynced() bool {
 	if s == nil {
 		return false
 	}
 	return s.ServiceEntries.HasSynced() &&
 		s.WorkloadEntries.HasSynced() &&
 		s.SelectedWorkloads.HasSynced() &&
-		s.SelectingServiceEntries.HasSynced() &&
 		s.Backends.HasSynced() &&
 		s.Endpoints.HasSynced()
 }
@@ -181,24 +205,18 @@ func selectedWorkloads(
 	ServiceEntries krt.Collection[seSelector],
 	WorkloadEntries krt.Collection[*networkingclient.WorkloadEntry],
 	Pods krt.Collection[krtcollections.LocalityPod],
-	aliaser Aliaser,
 ) (
 	krt.Collection[selectedWorkload],
 	krt.Index[string, selectedWorkload],
 ) {
-	seNsIndex := krtpkg.UnnamedIndex(ServiceEntries, func(o seSelector) []string {
-		namespaces := sets.New(o.GetNamespace())
-		if aliaser != nil {
-			for _, alias := range aliaser(o.ServiceEntry) {
-				if ns := alias.GetNamespace(); ns != "" {
-					namespaces.Insert(ns)
-				}
-			}
-		}
-		return namespaces.UnsortedList()
+	seNsIndex := krt.NewIndex(ServiceEntries, func(o seSelector) []string {
+		actualNs := o.GetNamespace()
+		namespaces := []string{actualNs}
+		// TODO peering should also include the parent namespace
+		return namespaces
 	})
 
-	// WorkloadEntries: selection logic and convert to Pod
+	// WorkloadEntries: selection logic and conver to LocalityPod
 	selectedWorkloadEntries := krt.NewCollection(WorkloadEntries, func(ctx krt.HandlerContext, we *networkingclient.WorkloadEntry) *selectedWorkload {
 		// find all the SEs that select this we
 		// if there are none, we can stop early
@@ -244,7 +262,7 @@ func selectedWorkloads(
 
 	// consolidate Pods and WorkloadEntries
 	allWorkloads := krt.JoinCollection([]krt.Collection[selectedWorkload]{selectedPods, selectedWorkloadEntries}, krt.WithName("ServiceEntrySelectWorkloads"))
-	workloadsByServiceEntry := krtpkg.UnnamedIndex(allWorkloads, func(o selectedWorkload) []string {
+	workloadsByServiceEntry := krt.NewIndex(allWorkloads, func(o selectedWorkload) []string {
 		return slices.Map(o.selectedBy, func(n krt.Named) string {
 			return n.ResourceName()
 		})
@@ -258,10 +276,7 @@ func selectedWorkloadFromEntry(
 	weSpec *networking.WorkloadEntry,
 	selectedBy []seSelector,
 ) selectedWorkload {
-	labels := maps.Clone(weSpec.GetLabels())
-	if labels == nil {
-		labels = map[string]string{}
-	}
+	labels := weSpec.GetLabels()
 	if metadataLabels != nil {
 		// WorkloadEntry has two places to specify labels.
 		// Merge the spec labels on top of the metadata ones
@@ -274,25 +289,6 @@ func selectedWorkloadFromEntry(
 		network = labels[label.TopologyNetwork.Name]
 	}
 
-	// we propagate the value to the labels so that endpoint plugins can see it
-	if network != "" {
-		labels[label.TopologyNetwork.Name] = network
-	}
-
-	// TODO inline endpoints don't get correct priority unless we copy
-	// the locality into labels; investigate prioritize logic to ensure
-	// we rely directly on PodLocality struct
-	locality := getLocality(weSpec.GetLocality(), labels)
-	if locality.Region != "" {
-		labels[corev1.LabelTopologyRegion] = locality.Region
-	}
-	if locality.Zone != "" {
-		labels[corev1.LabelTopologyZone] = locality.Zone
-	}
-	if locality.Subzone != "" {
-		labels[label.TopologySubzone.Name] = locality.Subzone
-	}
-
 	return selectedWorkload{
 		selectedBy: slices.Map(selectedBy, func(se seSelector) krt.Named {
 			return krt.NewNamed(se)
@@ -302,7 +298,7 @@ func selectedWorkloadFromEntry(
 				Name:      name,
 				Namespace: namespace,
 			},
-			Locality:        locality,
+			Locality:        getLocality(weSpec.GetLocality(), labels),
 			AugmentedLabels: labels,
 			Addresses:       []string{weSpec.GetAddress()},
 		},

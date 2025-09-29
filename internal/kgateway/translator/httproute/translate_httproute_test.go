@@ -11,21 +11,21 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
-	inf "sigs.k8s.io/gateway-api-inference-extension/api/v1"
+	infextv1a2 "sigs.k8s.io/gateway-api-inference-extension/api/v1alpha2"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/query"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/reports"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/translator/httproute"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/wellknown"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/reporter"
-	"github.com/kgateway-dev/kgateway/v2/pkg/reports"
 )
 
 var _ = Describe("GatewayHttpRouteTranslator", func() {
 	var (
-		ctrl *gomock.Controller
-		ctx  context.Context
+		ctrl       *gomock.Controller
+		ctx        context.Context
+		gwListener gwv1.Listener
 
 		// Shared variables for all tests
 		up                *ir.BackendObjectIR
@@ -33,19 +33,20 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 		routeir           *ir.HttpRouteIR
 		routeInfo         *query.RouteInfo
 		parentRef         *gwv1.ParentReference
-		baseReporter      reporter.Reporter
-		parentRefReporter reporter.ParentRefReporter
+		baseReporter      reports.Reporter
+		parentRefReporter reports.ParentRefReporter
 		reportsMap        reports.ReportMap
 
 		// Service backing for routes
 		backingSvc *corev1.Service
 
 		// Inferencepool backing for routes
-		backingPool *inf.InferencePool
+		backingPool *infextv1a2.InferencePool
 	)
 	BeforeEach(func() {
 		ctrl = gomock.NewController(GinkgoT())
 		ctx = context.Background()
+		gwListener = gwv1.Listener{}
 
 		// Common setup for both happy path and negative test cases
 		parentRef = &gwv1.ParentReference{
@@ -165,7 +166,7 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 			})
 
 			It("translates the route correctly", func() {
-				routes := httproute.TranslateGatewayHTTPRouteRules(ctx, routeInfo, parentRefReporter, baseReporter)
+				routes := httproute.TranslateGatewayHTTPRouteRules(ctx, gwListener, routeInfo, parentRefReporter, baseReporter)
 
 				Expect(routes).To(HaveLen(1))
 				Expect(routes[0].Name).To(Equal("httproute-foo-httproute-bar-0-0"))
@@ -173,7 +174,7 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 				Expect(routes[0].Match.Path.Type).To(BeEquivalentTo(ptr.To(gwv1.PathMatchPathPrefix)))
 				Expect(routes[0].Match.Path.Value).To(BeEquivalentTo(ptr.To("/")))
 
-				routeStatus := reportsMap.BuildRouteStatus(ctx, route, wellknown.DefaultGatewayClassName)
+				routeStatus := reportsMap.BuildRouteStatus(ctx, route, wellknown.GatewayControllerName)
 				Expect(routeStatus).NotTo(BeNil())
 				Expect(routeStatus.Parents).To(HaveLen(1))
 				By("verifying the route was accepted")
@@ -245,7 +246,7 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 			})
 
 			It("falls back to a blackhole cluster", func() {
-				routes := httproute.TranslateGatewayHTTPRouteRules(ctx, routeInfo, parentRefReporter, baseReporter)
+				routes := httproute.TranslateGatewayHTTPRouteRules(ctx, gwListener, routeInfo, parentRefReporter, baseReporter)
 
 				Expect(routes).To(HaveLen(1))
 				Expect(routes[0].Name).To(Equal("httproute-foo-httproute-bar-0-0"))
@@ -253,7 +254,7 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 				Expect(routes[0].Match.Path.Type).To(BeEquivalentTo(ptr.To(gwv1.PathMatchPathPrefix)))
 				Expect(routes[0].Match.Path.Value).To(BeEquivalentTo(ptr.To("/")))
 
-				routeStatus := reportsMap.BuildRouteStatus(ctx, route, wellknown.DefaultGatewayClassName)
+				routeStatus := reportsMap.BuildRouteStatus(ctx, route, wellknown.GatewayControllerName)
 				Expect(routeStatus).NotTo(BeNil())
 				Expect(routeStatus.Parents).To(HaveLen(1))
 				By("verifying the route was accepted")
@@ -272,18 +273,16 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 
 	Context("HTTPRoute resource routing with InferencePool backendRef", func() {
 		BeforeEach(func() {
-			backingPool = &inf.InferencePool{
+			backingPool = &infextv1a2.InferencePool{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       wellknown.InferencePoolKind,
-					APIVersion: inf.GroupVersion.String(),
+					APIVersion: infextv1a2.GroupVersion.String(),
 				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "my-inferencepool",
 					Namespace: "bar",
 				},
-				Spec: inf.InferencePoolSpec{
-					TargetPorts: []inf.Port{{Number: 8000}},
-				},
+				Spec: infextv1a2.InferencePoolSpec{},
 			}
 		})
 
@@ -306,7 +305,8 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 										Name:      gwv1.ObjectName(backingPool.Name),
 										Namespace: ptr.To(gwv1.Namespace(backingPool.Namespace)),
 										Kind:      ptr.To(gwv1.Kind(wellknown.InferencePoolKind)),
-										Group:     ptr.To(gwv1.Group(inf.GroupVersion.Group)),
+										Group:     ptr.To(gwv1.Group(infextv1a2.GroupVersion.Group)),
+										Port:      ptr.To(gwv1.PortNumber(9002)),
 									},
 								},
 							},
@@ -326,9 +326,9 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 											Namespace: backingPool.Namespace,
 											Name:      backingPool.Name,
 											Kind:      wellknown.InferencePoolKind,
-											Group:     inf.GroupVersion.Group,
+											Group:     infextv1a2.GroupVersion.Group,
 										},
-										Port: 8000,
+										Port: 9002,
 										Obj:  backingPool,
 									},
 									ClusterName: "inferencepool_cluster",
@@ -345,7 +345,7 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 
 			It("translates the route correctly", func() {
 				routes := httproute.TranslateGatewayHTTPRouteRules(
-					ctx, routeInfo, parentRefReporter, baseReporter)
+					ctx, gwListener, routeInfo, parentRefReporter, baseReporter)
 
 				Expect(routes).To(HaveLen(1))
 				Expect(routes[0].Name).To(Equal("httproute-foo-httproute-bar-0-0"))
@@ -353,7 +353,7 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 				Expect(routes[0].Backends).To(HaveLen(1))
 				Expect(routes[0].Backends[0].Backend.ClusterName).To(Equal("inferencepool_cluster"))
 
-				routeStatus := reportsMap.BuildRouteStatus(ctx, route, wellknown.DefaultGatewayClassName)
+				routeStatus := reportsMap.BuildRouteStatus(ctx, route, wellknown.GatewayControllerName)
 				Expect(routeStatus).NotTo(BeNil())
 				Expect(routeStatus.Parents).To(HaveLen(1))
 				By("verifying the route was accepted")
@@ -385,7 +385,7 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 									Name:      "missing-inferencepool",
 									Namespace: ptr.To(gwv1.Namespace(backingPool.Namespace)),
 									Kind:      ptr.To(gwv1.Kind(wellknown.InferencePoolKind)),
-									Group:     ptr.To(gwv1.Group(inf.GroupVersion.Group)),
+									Group:     ptr.To(gwv1.Group(infextv1a2.GroupVersion.Group)),
 									Port:      ptr.To(gwv1.PortNumber(9002)),
 								},
 							},
@@ -404,7 +404,7 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 											Namespace: backingPool.Namespace,
 											Name:      "missing-inferencepool",
 											Kind:      wellknown.InferencePoolKind,
-											Group:     inf.GroupVersion.Group,
+											Group:     infextv1a2.GroupVersion.Group,
 										},
 										Port: 9002,
 									},
@@ -423,12 +423,12 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 
 			It("falls back to a blackhole cluster", func() {
 				routes := httproute.TranslateGatewayHTTPRouteRules(
-					ctx, routeInfo, parentRefReporter, baseReporter)
+					ctx, gwListener, routeInfo, parentRefReporter, baseReporter)
 
 				Expect(routes).To(HaveLen(1))
 				Expect(routes[0].Backends[0].Backend.ClusterName).To(Equal("blackhole_cluster"))
 
-				routeStatus := reportsMap.BuildRouteStatus(ctx, route, wellknown.DefaultGatewayClassName)
+				routeStatus := reportsMap.BuildRouteStatus(ctx, route, wellknown.GatewayControllerName)
 				Expect(routeStatus).NotTo(BeNil())
 				Expect(routeStatus.Parents).To(HaveLen(1))
 				By("verifying the route was accepted")
@@ -452,7 +452,7 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 		//		var (
 		//			route             *gwv1.HTTPRoute
 		//			routeInfo         *query.RouteInfo
-		//			baseReporter      reporter.Reporter
+		//			baseReporter      reports.Reporter
 		//			parentRefReporter reports.ParentRefReporter
 		//			reportsMap        reports.ReportMap
 		//		)
@@ -718,4 +718,5 @@ var _ = Describe("GatewayHttpRouteTranslator", func() {
 		})
 		*/
 	})
+
 })

@@ -40,20 +40,6 @@ API_INPUT_DIRS_COMMA="${API_INPUT_DIRS_COMMA%,}" # drop trailing comma
 go tool register-gen --output-file zz_generated.register.go ${API_INPUT_DIRS_SPACE}
 go tool controller-gen crd:maxDescLen=0 object rbac:roleName=kgateway paths="${APIS_PKG}/api/${VERSION}" \
     output:crd:artifacts:config=${ROOT_DIR}/${CRD_DIR} output:rbac:artifacts:config=${ROOT_DIR}/${MANIFESTS_DIR}
-# Template the ClusterRole name to include the namespace
-if [[ "$OSTYPE" == "darwin"* ]]; then
-  # On macOS, prefer gsed (GNU sed) if available
-  if command -v gsed &> /dev/null; then
-    gsed -i 's/name: kgateway/name: kgateway-{{ .Release.Namespace }}/g' "${ROOT_DIR}/${MANIFESTS_DIR}/role.yaml"
-  else
-    # Fallback to macOS's native sed
-    sed -i '' 's/name: kgateway/name: kgateway-{{ .Release.Namespace }}/g' "${ROOT_DIR}/${MANIFESTS_DIR}/role.yaml"
-  fi
-else
-  # For other OSes like Linux
-  sed -i 's/name: kgateway/name: kgateway-{{ .Release.Namespace }}/g' "${ROOT_DIR}/${MANIFESTS_DIR}/role.yaml"
-fi
-
 
 # throw away
 new_report="$(mktemp -t "$(basename "$0").api_violations.XXXXXX")"
@@ -65,9 +51,7 @@ go tool openapi-gen \
   --output-pkg "github.com/kgateway-dev/kgateway/v2/pkg/generated/openapi" \
   $API_INPUT_DIRS_SPACE \
   sigs.k8s.io/gateway-api/apis/v1 \
-  sigs.k8s.io/gateway-api/apis/v1alpha2 \
   k8s.io/apimachinery/pkg/apis/meta/v1 \
-  k8s.io/api/apps/v1 \
   k8s.io/api/core/v1 \
   k8s.io/apimachinery/pkg/runtime \
   k8s.io/apimachinery/pkg/util/intstr \
@@ -88,8 +72,7 @@ go tool client-gen \
   --output-pkg "${OUTPUT_PKG}/${CLIENTSET_PKG_NAME}" \
   --apply-configuration-package "${APIS_PKG}/api/applyconfiguration"
 
-go generate ${ROOT_DIR}/internal/...
-go generate ${ROOT_DIR}/pkg/...
+go generate ${ROOT_DIR}/internal/envoyinit/hack/...
 
 # fix imports of gen code
 go tool goimports -w ${ROOT_DIR}/${CLIENT_GEN_DIR}

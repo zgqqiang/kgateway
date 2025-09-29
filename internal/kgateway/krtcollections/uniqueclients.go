@@ -4,21 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
 
-	envoycorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	envoy_service_discovery_v3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	xdsserver "github.com/envoyproxy/go-control-plane/pkg/server/v3"
+	"github.com/solo-io/go-utils/contextutils"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/structpb"
 	"istio.io/istio/pkg/kube/krt"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/utils/krtutil"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/xds"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/krtutil"
 )
 
 type ConnectedClient struct {
@@ -40,7 +41,7 @@ func newConnectedClient(uniqueClientName string) ConnectedClient {
 // We then fetch that pod to get its labels, create a UniqlyConnectedClient and it them to the collection.
 
 type callbacksCollection struct {
-	logger           *slog.Logger
+	logger           *zap.Logger
 	augmentedPods    krt.Collection[LocalityPod]
 	clients          map[int64]ConnectedClient
 	uniqClientsCount map[string]uint64
@@ -51,8 +52,7 @@ type callbacksCollection struct {
 }
 
 type callbacks struct {
-	collection        atomic.Pointer[callbacksCollection]
-	extraXDSCallbacks xdsserver.Callbacks
+	collection atomic.Pointer[callbacksCollection]
 }
 
 // If augmentedPods is nil, we won't use the pod locality info, and all pods for the same gateway will receive the same config.
@@ -61,9 +61,8 @@ type UniquelyConnectedClientsBulider func(ctx context.Context, krtOpts krtutil.K
 // THIS IS THE SET OF THINGS WE RUN TRANSLATION FOR
 // add returned callbacks to the xds server.
 
-func NewUniquelyConnectedClients(extraXDSCallbacks xdsserver.Callbacks) (xdsserver.Callbacks, UniquelyConnectedClientsBulider) {
-	cb := &callbacks{extraXDSCallbacks: extraXDSCallbacks}
-
+func NewUniquelyConnectedClients() (xdsserver.Callbacks, UniquelyConnectedClientsBulider) {
+	cb := &callbacks{}
 	envoycb := xdsserver.CallbackFuncs{
 		StreamClosedFunc:  cb.OnStreamClosed,
 		StreamRequestFunc: cb.OnStreamRequest,
@@ -76,7 +75,7 @@ func buildCollection(callbacks *callbacks) UniquelyConnectedClientsBulider {
 	return func(ctx context.Context, krtOpts krtutil.KrtOptions, augmentedPods krt.Collection[LocalityPod]) krt.Collection[ir.UniqlyConnectedClient] {
 		trigger := krt.NewRecomputeTrigger(true)
 		col := &callbacksCollection{
-			logger:           logger,
+			logger:           contextutils.LoggerFrom(ctx).Desugar(),
 			augmentedPods:    augmentedPods,
 			clients:          make(map[int64]ConnectedClient),
 			uniqClientsCount: make(map[string]uint64),
@@ -97,11 +96,7 @@ func buildCollection(callbacks *callbacks) UniquelyConnectedClientsBulider {
 }
 
 // OnStreamClosed is called immediately prior to closing an xDS stream with a stream ID.
-func (x *callbacks) OnStreamClosed(sid int64, node *envoycorev3.Node) {
-	if x.extraXDSCallbacks != nil {
-		x.extraXDSCallbacks.OnStreamClosed(sid, node)
-	}
-
+func (x *callbacks) OnStreamClosed(sid int64, node *envoy_config_core_v3.Node) {
 	c := x.collection.Load()
 	if c == nil {
 		return
@@ -168,7 +163,7 @@ func (x *callbacksCollection) add(sid int64, r *envoy_service_discovery_v3.Disco
 			}
 		}
 		role := roleFromRequest(r)
-		x.logger.Debug("adding xds client", "locality", locality, "ns", ns, "labels", labels, "role", role)
+		x.logger.Debug("adding xds client", zap.Any("locality", locality), zap.String("ns", ns), zap.Any("labels", labels), zap.String("role", role))
 		// TODO: modify request to include the label that are relevant for the client?
 		ucc := ir.NewUniqlyConnectedClient(role, ns, labels, locality)
 		c = newConnectedClient(ucc.ResourceName())
@@ -186,14 +181,8 @@ func (x *callbacksCollection) add(sid int64, r *envoy_service_discovery_v3.Disco
 // OnStreamRequest is called once a request is received on a stream.
 // Returning an error will end processing and close the stream. OnStreamClosed will still be called.
 func (x *callbacks) OnStreamRequest(sid int64, r *envoy_service_discovery_v3.DiscoveryRequest) error {
-	if x.extraXDSCallbacks != nil {
-		if err := x.extraXDSCallbacks.OnStreamRequest(sid, r); err != nil {
-			return err
-		}
-	}
-
 	role := roleFromRequest(r)
-	// check that this collection only handles kgateway clients
+	// as gloo-edge and kgateway share a control plane, check that this collection only handles kgateway clients
 	// TODO remove this check if it's no longer needed
 	if !xds.IsKubeGatewayCacheKey(role) {
 		return nil
@@ -208,7 +197,7 @@ func (x *callbacks) OnStreamRequest(sid int64, r *envoy_service_discovery_v3.Dis
 func (x *callbacksCollection) newStream(sid int64, r *envoy_service_discovery_v3.DiscoveryRequest) error {
 	ucc, isNew, err := x.add(sid, r)
 	if err != nil {
-		x.logger.Debug("error processing xds client", "error", err)
+		x.logger.Debug("error processing xds client", zap.Error(err))
 		return err
 	}
 	if ucc != "" {
@@ -220,7 +209,7 @@ func (x *callbacksCollection) newStream(sid int64, r *envoy_service_discovery_v3
 			nodeMd.Fields = map[string]*structpb.Value{}
 		}
 
-		x.logger.Debug("augmenting role in node metadata", "resource_name", ucc)
+		x.logger.Debug("augmenting role in node metadata", zap.String("resourceName", ucc))
 		// NOTE: this changes the role to include the unique client. This is coupled
 		// with how the snapshot is inserted to the cache for the proxy - it needs to be done with
 		// the unique client resource name as well.
@@ -246,14 +235,8 @@ func (x *callbacksCollection) getClients() []ir.UniqlyConnectedClient {
 // OnFetchRequest is called for each Fetch request. Returning an error will end processing of the
 // request and respond with an error.
 func (x *callbacks) OnFetchRequest(ctx context.Context, r *envoy_service_discovery_v3.DiscoveryRequest) error {
-	if x.extraXDSCallbacks != nil {
-		if err := x.extraXDSCallbacks.OnFetchRequest(ctx, r); err != nil {
-			return err
-		}
-	}
-
 	role := r.GetNode().GetMetadata().GetFields()[xds.RoleKey].GetStringValue()
-	// check that this collection only handles kgateway clients
+	// as gloo-edge and kgateway share a control plane, check that this collection only handles kgateway clients
 	// TODO remove this check if it's no longer needed
 	if !xds.IsKubeGatewayCacheKey(role) {
 		return nil
@@ -285,7 +268,7 @@ func (x *callbacksCollection) fetchRequest(_ context.Context, r *envoy_service_d
 		nodeMd.Fields = map[string]*structpb.Value{}
 	}
 
-	x.logger.Debug("augmenting role in node metadata", "resource_name", ucc.ResourceName())
+	x.logger.Debug("augmenting role in node metadata", zap.String("resourceName", ucc.ResourceName()))
 	// NOTE: this changes the role to include the unique client. This is coupled
 	// with how the snapshot is inserted to the cache for the proxy - it needs to be done with
 	// the unique client resource name as well.
@@ -294,7 +277,7 @@ func (x *callbacksCollection) fetchRequest(_ context.Context, r *envoy_service_d
 	return nil
 }
 
-func getRef(node *envoycorev3.Node) types.NamespacedName {
+func getRef(node *envoy_config_core_v3.Node) types.NamespacedName {
 	nns := node.GetId()
 	split := strings.SplitN(nns, ".", 2)
 	if len(split) != 2 {

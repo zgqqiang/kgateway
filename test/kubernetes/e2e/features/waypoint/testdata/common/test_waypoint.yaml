@@ -8,4 +8,4 @@ spec:
   listeners:
   - name: proxy
     port: 15088
-    protocol: istio.io/PROXY  
+    protocol: istio.io/PROXY

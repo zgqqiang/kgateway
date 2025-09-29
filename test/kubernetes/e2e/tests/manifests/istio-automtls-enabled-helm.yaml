@@ -1,3 +1,5 @@
-controller:
-  extraEnv:
-    KGW_ENABLE_ISTIO_AUTO_MTLS: true
+global:
+  # Set up gloo with istio integration enabled
+  istioIntegration:
+    enabled: true
+    enableAutoMtls: true # Automtls is enabled in this test setup

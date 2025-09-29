@@ -6,7 +6,7 @@ on:
     types: [checks_requested]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref_name }}
+  group: ${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -25,20 +25,20 @@ jobs:
   static-analysis:
     name: Lint Checks
     runs-on: ubuntu-22.04
-    # The linter is intended to run quickly, although prep-go-runner can take minutes.
+    # The linter is intended to run quickly.
     # We define a 10-minute timeout on the linter config (.golangci.yaml) as well.
     # If we exceed this timeout, we should consider only running the linter on changed files.
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
     - name: Check out code into the Go module directory
       uses: actions/checkout@v4
     - name: Prep Go Runner
       uses: ./.github/actions/prep-go-runner
-    - uses: golangci/golangci-lint-action@v7
+    - uses: golangci/golangci-lint-action@v6
       # `make analyze` runs the linter with similar arguments to what we use here.
       # If this action fails, try running `make analyze` locally.
       with:
-        version: v2.1.6
+        version: v1.64.5
         args: --verbose --modules-download-mode=readonly --allow-parallel-runners
         skip-cache: true
         skip-save-cache: true

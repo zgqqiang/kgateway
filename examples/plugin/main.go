@@ -5,8 +5,8 @@ import (
 	"time"
 
 	mutation_v3 "github.com/envoyproxy/go-control-plane/envoy/config/common/mutation_rules/v3"
-	envoycorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	envoyroutev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	envoy_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	envoy_config_route_v3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	header_mutationv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/header_mutation/v3"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -16,15 +16,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/common"
+	extensionsplug "github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/plugin"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/plugins"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/setup"
-	"github.com/kgateway-dev/kgateway/v2/pkg/deployer"
-	sdk "github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk"
-	collections "github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/collections"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/reporter"
 )
 
 /******
@@ -33,7 +29,7 @@ An example plugin, that uses a ConfigMap as a policy. We use a targetRef annotat
 policy to an HTTPRouter. We will then add the key value pairs in the ConfigMap to the metadata of
 the envoy route route.
 
-Example ConfigMap:
+Exmaple ConfigMap:
 
 apiVersion: v1
 kind: ConfigMap
@@ -124,17 +120,14 @@ func extractTargetRefs(cm *corev1.ConfigMap) []ir.PolicyRef {
 
 // Create a collection of our policies. This will be done by converting a configmap collection
 // to our policy IR.
-func ourPolicies(commoncol *collections.CommonCollections) krt.Collection[ir.PolicyWrapper] {
+func ourPolicies(commoncol *common.CommonCollections) krt.Collection[ir.PolicyWrapper] {
 	// We create 2 collections here - one for the source config maps, and one for the policy IR.
 	// Whenever creating a new krtCollection use commoncol.KrtOpts.ToOptions("<Name>") to provide the
 	// collection with common options and a name. It's important so that the collection appears in
 	// the krt debug page.
 
-	// Use the default discovery namespace filter to filter configmaps not in the list of discovery namespaces
-	filter := kclient.Filter{ObjectFilter: commoncol.Client.ObjectFilter()}
-
 	// get a configmap client going
-	configMapCol := krt.WrapClient(kclient.NewFiltered[*corev1.ConfigMap](commoncol.Client, filter), commoncol.KrtOpts.ToOptions("ConfigMaps")...)
+	configMapCol := krt.WrapClient(kclient.New[*corev1.ConfigMap](commoncol.Client), commoncol.KrtOpts.ToOptions("ConfigMaps")...)
 
 	// convertIt to policy IR
 	return krt.NewCollection(configMapCol, func(krtctx krt.HandlerContext, i *corev1.ConfigMap) *ir.PolicyWrapper {
@@ -168,7 +161,7 @@ type ourPolicyPass struct {
 }
 
 // ApplyForRoute is called when a an HTTPRouteRule is being translated to an envoy route.
-func (s *ourPolicyPass) ApplyForRoute(pCtx *ir.RouteContext, out *envoyroutev3.Route) error {
+func (s *ourPolicyPass) ApplyForRoute(ctx context.Context, pCtx *ir.RouteContext, out *envoy_config_route_v3.Route) error {
 	// get our policy IR. Kgateway used the targetRef to attach the policy to the HTTPRoute. and now as it
 	// translates the HTTPRoute to xDS, it calls our plugin and passes the policy for the plugin's translation pass to do the
 	// policy to xDS translation.
@@ -179,7 +172,7 @@ func (s *ourPolicyPass) ApplyForRoute(pCtx *ir.RouteContext, out *envoyroutev3.R
 	}
 	// apply the metadata from our IR to envoy's route object
 	if out.Metadata == nil {
-		out.Metadata = &envoycorev3.Metadata{}
+		out.Metadata = &envoy_core_v3.Metadata{}
 	}
 	out.Metadata.FilterMetadata["example.plugin"] = cmIr.metadata
 
@@ -192,7 +185,7 @@ func (s *ourPolicyPass) ApplyForRoute(pCtx *ir.RouteContext, out *envoyroutev3.R
 	return nil
 }
 
-func (s *ourPolicyPass) HttpFilters(fc ir.FilterChainCommon) ([]plugins.StagedHttpFilter, error) {
+func (s *ourPolicyPass) HttpFilters(ctx context.Context, fc ir.FilterChainCommon) ([]plugins.StagedHttpFilter, error) {
 	if !s.filterNeeded[fc.FilterChainName] {
 		return nil, nil
 	}
@@ -204,8 +197,8 @@ func (s *ourPolicyPass) HttpFilters(fc ir.FilterChainCommon) ([]plugins.StagedHt
 					ResponseMutations: []*mutation_v3.HeaderMutation{
 						{
 							Action: &mutation_v3.HeaderMutation_Append{
-								Append: &envoycorev3.HeaderValueOption{
-									Header: &envoycorev3.HeaderValue{
+								Append: &envoy_core_v3.HeaderValueOption{
+									Header: &envoy_core_v3.HeaderValue{
 										Key:   "x-metadata-added",
 										Value: "true",
 									},
@@ -220,13 +213,13 @@ func (s *ourPolicyPass) HttpFilters(fc ir.FilterChainCommon) ([]plugins.StagedHt
 }
 
 // A function that initializes our plugins.
-func pluginFactory(ctx context.Context, commoncol *collections.CommonCollections, mergeSettingsJSON string) []sdk.Plugin {
-	return []sdk.Plugin{
+func pluginFactory(ctx context.Context, commoncol *common.CommonCollections) []extensionsplug.Plugin {
+	return []extensionsplug.Plugin{
 		{
-			ContributesPolicies: sdk.ContributesPolicies{
-				configMapGK: sdk.PolicyPlugin{
+			ContributesPolicies: extensionsplug.ContributesPolicies{
+				configMapGK: extensionsplug.PolicyPlugin{
 					Name: "metadataPolicy",
-					NewGatewayTranslationPass: func(tctx ir.GwTranslationCtx, reporter reporter.Reporter) ir.ProxyTranslationPass {
+					NewGatewayTranslationPass: func(ctx context.Context, tctx ir.GwTranslationCtx) ir.ProxyTranslationPass {
 						// Return a fresh new translation pass
 						return &ourPolicyPass{}
 					},
@@ -238,20 +231,11 @@ func pluginFactory(ctx context.Context, commoncol *collections.CommonCollections
 	}
 }
 
-func extraGatewayParametersFactory(cli client.Client, inputs *deployer.Inputs) []deployer.ExtraGatewayParameters {
-	return make([]deployer.ExtraGatewayParameters, 0)
-}
-
 func main() {
 	// TODO: move setup.StartGGv2 from internal to public.
 	// Start Kgateway and provide our plugin.
 	// This demonstrates how to start Kgateway with a custom plugin.
 	// This binary is the control plane. normally it would be packaged in a docker image and run
 	// in a k8s cluster.
-
-	setup, _ := setup.New(
-		setup.WithExtraPlugins(pluginFactory),
-		setup.ExtraGatewayParameters(extraGatewayParametersFactory),
-	)
-	setup.Start(context.Background())
+	setup.StartKgateway(context.Background(), pluginFactory)
 }

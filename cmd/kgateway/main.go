@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 
@@ -21,15 +22,11 @@ func main() {
 				fmt.Println(version.String())
 				return nil
 			}
-			probes.StartLivenessProbeServer(cmd.Context())
-			s, err := setup.New()
-			if err != nil {
-				return fmt.Errorf("error setting up kgateway: %w", err)
-			}
-			if err := s.Start(cmd.Context()); err != nil {
+			ctx := context.Background()
+			probes.StartLivenessProbeServer(ctx)
+			if err := setup.Main(ctx); err != nil {
 				return fmt.Errorf("err in main: %w", err)
 			}
-
 			return nil
 		},
 	}

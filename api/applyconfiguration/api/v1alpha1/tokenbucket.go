@@ -2,16 +2,12 @@
 
 package v1alpha1
 
-import (
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-)
-
 // TokenBucketApplyConfiguration represents a declarative configuration of the TokenBucket type for use
 // with apply.
 type TokenBucketApplyConfiguration struct {
-	MaxTokens     *int32       `json:"maxTokens,omitempty"`
-	TokensPerFill *int32       `json:"tokensPerFill,omitempty"`
-	FillInterval  *v1.Duration `json:"fillInterval,omitempty"`
+	MaxTokens     *uint32 `json:"maxTokens,omitempty"`
+	TokensPerFill *uint32 `json:"tokensPerFill,omitempty"`
+	FillInterval  *string `json:"fillInterval,omitempty"`
 }
 
 // TokenBucketApplyConfiguration constructs a declarative configuration of the TokenBucket type for use with
@@ -23,7 +19,7 @@ func TokenBucket() *TokenBucketApplyConfiguration {
 // WithMaxTokens sets the MaxTokens field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the MaxTokens field is set to the value of the last call.
-func (b *TokenBucketApplyConfiguration) WithMaxTokens(value int32) *TokenBucketApplyConfiguration {
+func (b *TokenBucketApplyConfiguration) WithMaxTokens(value uint32) *TokenBucketApplyConfiguration {
 	b.MaxTokens = &value
 	return b
 }
@@ -31,7 +27,7 @@ func (b *TokenBucketApplyConfiguration) WithMaxTokens(value int32) *TokenBucketA
 // WithTokensPerFill sets the TokensPerFill field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the TokensPerFill field is set to the value of the last call.
-func (b *TokenBucketApplyConfiguration) WithTokensPerFill(value int32) *TokenBucketApplyConfiguration {
+func (b *TokenBucketApplyConfiguration) WithTokensPerFill(value uint32) *TokenBucketApplyConfiguration {
 	b.TokensPerFill = &value
 	return b
 }
@@ -39,7 +35,7 @@ func (b *TokenBucketApplyConfiguration) WithTokensPerFill(value int32) *TokenBuc
 // WithFillInterval sets the FillInterval field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the FillInterval field is set to the value of the last call.
-func (b *TokenBucketApplyConfiguration) WithFillInterval(value v1.Duration) *TokenBucketApplyConfiguration {
+func (b *TokenBucketApplyConfiguration) WithFillInterval(value string) *TokenBucketApplyConfiguration {
 	b.FillInterval = &value
 	return b
 }

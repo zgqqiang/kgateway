@@ -1,49 +1,78 @@
 package backendtlspolicy
 
 import (
-	envoycorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	envoytlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
-	corev1 "k8s.io/api/core/v1"
+	"errors"
 
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/translator/sslutils"
+	envoycore "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	envoyauth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	envoymatcher "github.com/envoyproxy/go-control-plane/envoy/type/matcher/v3"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // handles conversion into envoy auth types
 // based on https://github.com/solo-io/gloo/blob/main/projects/gloo/pkg/utils/ssl.go#L76
 
-func ResolveUpstreamSslConfig(cm *corev1.ConfigMap, validation *envoytlsv3.CertificateValidationContext, sni string) (*envoytlsv3.UpstreamTlsContext, error) {
-	common, err := ResolveCommonSslConfig(cm, validation, false)
+var noKeyFoundMsg = "no key ca.crt found"
+
+func ResolveUpstreamSslConfig(cm *corev1.ConfigMap, sni string) (*envoyauth.UpstreamTlsContext, error) {
+	common, err := ResolveCommonSslConfig(cm, false)
 	if err != nil {
 		return nil, err
 	}
 
-	return &envoytlsv3.UpstreamTlsContext{
+	return &envoyauth.UpstreamTlsContext{
 		CommonTlsContext: common,
 		Sni:              sni,
 	}, nil
 }
 
-func ResolveCommonSslConfig(cm *corev1.ConfigMap, validation *envoytlsv3.CertificateValidationContext, mustHaveCert bool) (*envoytlsv3.CommonTlsContext, error) {
-	caCrt, err := sslutils.GetCACertFromConfigMap(cm)
+func ResolveCommonSslConfig(cm *corev1.ConfigMap, mustHaveCert bool) (*envoyauth.CommonTlsContext, error) {
+	caCrt, err := getSslSecrets(cm)
 	if err != nil {
 		return nil, err
 	}
 
-	caCrtData := envoycorev3.DataSource{
-		Specifier: &envoycorev3.DataSource_InlineString{
+	// TODO: should we do some validation on the CA?
+	caCrtData := envoycore.DataSource{
+		Specifier: &envoycore.DataSource_InlineString{
 			InlineString: caCrt,
 		},
 	}
 
-	tlsContext := &envoytlsv3.CommonTlsContext{
+	tlsContext := &envoyauth.CommonTlsContext{
 		// default params
-		TlsParams: &envoytlsv3.TlsParameters{},
-	}
-	validation.TrustedCa = &caCrtData
-	validationCtx := &envoytlsv3.CommonTlsContext_ValidationContext{
-		ValidationContext: validation,
+		TlsParams: &envoyauth.TlsParameters{},
 	}
 
+	validationCtx := &envoyauth.CommonTlsContext_ValidationContext{
+		ValidationContext: &envoyauth.CertificateValidationContext{
+			TrustedCa: &caCrtData,
+		},
+	}
+	// sanList := VerifySanListToMatchSanList(cs.GetVerifySubjectAltName())
+	// if len(sanList) != 0 {
+	// 	validationCtx.ValidationContext.MatchSubjectAltNames = sanList
+	// }
 	tlsContext.ValidationContextType = validationCtx
-	return tlsContext, nil
+	return tlsContext, err
+}
+
+func getSslSecrets(cm *corev1.ConfigMap) (string, error) {
+	caCrt, ok := cm.Data["ca.crt"]
+	if !ok {
+		return "", errors.New(noKeyFoundMsg)
+	}
+
+	return caCrt, nil
+}
+
+func VerifySanListToMatchSanList(sanList []string) []*envoymatcher.StringMatcher {
+	var matchSanList []*envoymatcher.StringMatcher
+	for _, san := range sanList {
+		matchSan := &envoymatcher.StringMatcher{
+			MatchPattern: &envoymatcher.StringMatcher_Exact{Exact: san},
+		}
+		matchSanList = append(matchSanList, matchSan)
+	}
+	return matchSanList
 }

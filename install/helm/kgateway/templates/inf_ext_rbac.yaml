@@ -2,20 +2,17 @@
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: kgateway-inference-extension-{{ .Release.Namespace }}
+  name: kgateway-inference-extension
 rules:
 - apiGroups: ["inference.networking.x-k8s.io"]
-  resources: ["inferenceobjectives"]
+  resources: ["inferencemodels"]
   verbs: ["get", "watch", "list"]
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["get", "watch", "list"]
-- apiGroups: ["inference.networking.k8s.io"]
+- apiGroups: ["inference.networking.x-k8s.io"]
   resources: ["inferencepools"]
   verbs: ["get", "watch", "list", "update"]
-- apiGroups: ["inference.networking.k8s.io"]
-  resources: ["inferencepools/status"]
-  verbs: ["update"]
 - apiGroups: ["discovery.k8s.io"]
   resources: ["endpointslices"]
   verbs: ["get", "watch", "list"]
@@ -48,13 +45,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "kgateway.name" . }}-inference-extension-role-{{ .Release.Namespace }}
+  name: {{ include "kgateway.name" . }}-inference-extension-role
 subjects:
 - kind: ServiceAccount
   name: {{ include "kgateway.serviceAccountName" . }}
   namespace: {{ .Release.Namespace }}
 roleRef:
   kind: ClusterRole
-  name: {{ include "kgateway.name" . }}-inference-extension-{{ .Release.Namespace }}
+  name: {{ include "kgateway.name" . }}-inference-extension
   apiGroup: rbac.authorization.k8s.io
 {{- end }}

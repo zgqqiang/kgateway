@@ -1,10 +1,8 @@
 package v1alpha1
 
 import (
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 // +kubebuilder:rbac:groups=gateway.kgateway.dev,resources=gatewayparameters,verbs=get;list;watch
@@ -37,119 +35,79 @@ type GatewayParametersList struct {
 // A GatewayParametersSpec describes the type of environment/platform in which
 // the proxy will be provisioned.
 //
-// +kubebuilder:validation:ExactlyOneOf=kube;selfManaged
+// +kubebuilder:validation:XValidation:message="only one of 'kube' or 'selfManaged' may be set",rule="(has(self.kube) && !has(self.selfManaged)) || (!has(self.kube) && has(self.selfManaged))"
 type GatewayParametersSpec struct {
 	// The proxy will be deployed on Kubernetes.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Kube *KubernetesProxyConfig `json:"kube,omitempty"`
 
 	// The proxy will be self-managed and not auto-provisioned.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	SelfManaged *SelfManagedGateway `json:"selfManaged,omitempty"`
 }
 
-func (in *GatewayParametersSpec) GetKube() *KubernetesProxyConfig {
-	if in == nil {
-		return nil
-	}
-	return in.Kube
-}
-
-func (in *GatewayParametersSpec) GetSelfManaged() *SelfManagedGateway {
-	if in == nil {
-		return nil
-	}
-	return in.SelfManaged
-}
-
 // The current conditions of the GatewayParameters. This is not currently implemented.
-type GatewayParametersStatus struct{}
+type GatewayParametersStatus struct {
+}
 
-type SelfManagedGateway struct{}
+type SelfManagedGateway struct {
+}
 
-// KubernetesProxyConfig configures the set of Kubernetes resources that will be provisioned
+// Configuration for the set of Kubernetes resources that will be provisioned
 // for a given Gateway.
 type KubernetesProxyConfig struct {
 	// Use a Kubernetes deployment as the proxy workload type. Currently, this is the only
 	// supported workload type.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Deployment *ProxyDeployment `json:"deployment,omitempty"`
 
 	// Configuration for the container running Envoy.
-	// If agentgateway is enabled, the EnvoyContainer values will be ignored.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	EnvoyContainer *EnvoyContainer `json:"envoyContainer,omitempty"`
 
 	// Configuration for the container running the Secret Discovery Service (SDS).
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	SdsContainer *SdsContainer `json:"sdsContainer,omitempty"`
 
 	// Configuration for the pods that will be created.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	PodTemplate *Pod `json:"podTemplate,omitempty"`
 
 	// Configuration for the Kubernetes Service that exposes the Envoy proxy over
 	// the network.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Service *Service `json:"service,omitempty"`
 
 	// Configuration for the Kubernetes ServiceAccount used by the Envoy pod.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	ServiceAccount *ServiceAccount `json:"serviceAccount,omitempty"`
 
 	// Configuration for the Istio integration.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Istio *IstioIntegration `json:"istio,omitempty"`
 
 	// Configuration for the stats server.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Stats *StatsConfig `json:"stats,omitempty"`
 
-	// Deprecated: `aiExtension` is deprecated in v2.1 and will be removed in v2.2.
-	// Prefer to use `agentgateway` instead.
-	//
 	// Configuration for the AI extension.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	AiExtension *AiExtension `json:"aiExtension,omitempty"`
 
-	// Configure the agentgateway integration. If agentgateway is disabled, the
-	// EnvoyContainer values will be used by default to configure the data
-	// plane proxy.
-	//
-	// +optional
-	Agentgateway *Agentgateway `json:"agentgateway,omitempty"`
-
-	// Deprecated: Prefer to use omitDefaultSecurityContext instead. Will be
-	// removed in the next release.
-	//
 	// Used to unset the `runAsUser` values in security contexts.
 	FloatingUserId *bool `json:"floatingUserId,omitempty"`
-
-	// OmitDefaultSecurityContext is used to control whether or not
-	// `securityContext` fields should be rendered for the various generated
-	// Deployments/Containers that are dynamically provisioned by the deployer.
-	//
-	// When set to true, no `securityContexts` will be provided and will left
-	// to the user/platform to be provided.
-	//
-	// This should be enabled on platforms such as Red Hat OpenShift where the
-	// `securityContext` will be dynamically added to enforce the appropriate
-	// level of security.
-	//
-	// +optional
-	OmitDefaultSecurityContext *bool `json:"omitDefaultSecurityContext,omitempty"`
 }
 
 func (in *KubernetesProxyConfig) GetDeployment() *ProxyDeployment {
@@ -215,13 +173,6 @@ func (in *KubernetesProxyConfig) GetAiExtension() *AiExtension {
 	return in.AiExtension
 }
 
-func (in *KubernetesProxyConfig) GetAgentgateway() *Agentgateway {
-	if in == nil {
-		return nil
-	}
-	return in.Agentgateway
-}
-
 func (in *KubernetesProxyConfig) GetFloatingUserId() *bool {
 	if in == nil {
 		return nil
@@ -229,69 +180,27 @@ func (in *KubernetesProxyConfig) GetFloatingUserId() *bool {
 	return in.FloatingUserId
 }
 
-func (in *KubernetesProxyConfig) GetOmitDefaultSecurityContext() *bool {
-	if in == nil {
-		return nil
-	}
-	return in.OmitDefaultSecurityContext
-}
-
-// ProxyDeployment configures the Proxy deployment in Kubernetes.
-// +kubebuilder:validation:AtMostOneOf=replicas;omitReplicas
+// Configuration for the Proxy deployment in Kubernetes.
 type ProxyDeployment struct {
 	// The number of desired pods. Defaults to 1.
 	//
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	Replicas *int32 `json:"replicas,omitempty"`
-
-	// If true, replicas will not be set in the deployment (allowing HPA to control scaling)
-	// +optional
-	OmitReplicas *bool `json:"omitReplicas,omitempty"`
-
-	// The deployment strategy to use to replace existing pods with new
-	// ones. The Kubernetes default is a RollingUpdate with 25% maxUnavailable,
-	// 25% maxSurge.
-	//
-	// E.g., to recreate pods, minimizing resources for the rollout but causing downtime:
-	// strategy:
-	//   type: Recreate
-	// E.g., to roll out as a RollingUpdate but with non-default parameters:
-	// strategy:
-	//   type: RollingUpdate
-	//   rollingUpdate:
-	//     maxSurge: 100%
-	//
-	// +optional
-	Strategy *appsv1.DeploymentStrategy `json:"strategy,omitempty"`
+	// +kubebuilder:validation:Optional
+	Replicas *uint32 `json:"replicas,omitempty"`
 }
 
-func (in *ProxyDeployment) GetReplicas() *int32 {
+func (in *ProxyDeployment) GetReplicas() *uint32 {
 	if in == nil {
 		return nil
 	}
 	return in.Replicas
 }
 
-func (in *ProxyDeployment) GetOmitReplicas() *bool {
-	if in == nil {
-		return nil
-	}
-	return in.OmitReplicas
-}
-
-func (in *ProxyDeployment) GetStrategy() *appsv1.DeploymentStrategy {
-	if in == nil {
-		return nil
-	}
-	return in.Strategy
-}
-
-// EnvoyContainer configures the container running Envoy.
+// Configuration for the container running Envoy.
 type EnvoyContainer struct {
+
 	// Initial envoy configuration.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Bootstrap *EnvoyBootstrap `json:"bootstrap,omitempty"`
 
 	// The envoy container image. See
@@ -301,40 +210,26 @@ type EnvoyContainer struct {
 	// Default values, which may be overridden individually:
 	//
 	//	registry: quay.io/solo-io
-	//	repository: envoy-wrapper
-	//	tag: <kgateway version>
+	//	repository: gloo-envoy-wrapper (OSS) / gloo-ee-envoy-wrapper (EE)
+	//	tag: <gloo version> (OSS) / <gloo-ee version> (EE)
 	//	pullPolicy: IfNotPresent
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Image *Image `json:"image,omitempty"`
 
 	// The security context for this container. See
 	// https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.26/#securitycontext-v1-core
 	// for details.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
 
 	// The compute resources required by this container. See
 	// https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
 	// for details.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
-
-	// do not use slice of pointers: https://github.com/kubernetes/code-generator/issues/166
-
-	// The container environment variables.
-	//
-	// +optional
-	Env []corev1.EnvVar `json:"env,omitempty"`
-
-	// Additional volume mounts to add to the container. See
-	// https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.26/#volumemount-v1-core
-	// for details.
-	//
-	// +optional
-	ExtraVolumeMounts []corev1.VolumeMount `json:"extraVolumeMounts,omitempty"`
 }
 
 func (in *EnvoyContainer) GetBootstrap() *EnvoyBootstrap {
@@ -365,14 +260,7 @@ func (in *EnvoyContainer) GetResources() *corev1.ResourceRequirements {
 	return in.Resources
 }
 
-func (in *EnvoyContainer) GetEnv() []corev1.EnvVar {
-	if in == nil {
-		return nil
-	}
-	return in.Env
-}
-
-// EnvoyBootstrap configures the Envoy proxy instance that is provisioned from a
+// Configuration for the Envoy proxy instance that is provisioned from a
 // Kubernetes Gateway.
 type EnvoyBootstrap struct {
 	// Envoy log level. Options include "trace", "debug", "info", "warn", "error",
@@ -380,7 +268,7 @@ type EnvoyBootstrap struct {
 	// https://www.envoyproxy.io/docs/envoy/latest/start/quick-start/run-envoy#debugging-envoy
 	// for more information.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	LogLevel *string `json:"logLevel,omitempty"`
 
 	// Envoy log levels for specific components. The keys are component names and
@@ -400,7 +288,7 @@ type EnvoyBootstrap struct {
 	//
 	// Note: the keys and values cannot be empty, but they are not otherwise validated.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	ComponentLogLevels map[string]string `json:"componentLogLevels,omitempty"`
 }
 
@@ -418,32 +306,32 @@ func (in *EnvoyBootstrap) GetComponentLogLevels() map[string]string {
 	return in.ComponentLogLevels
 }
 
-// SdsContainer configures the container running SDS sidecar.
+// Configuration for the container running Gloo SDS.
 type SdsContainer struct {
 	// The SDS container image. See
 	// https://kubernetes.io/docs/concepts/containers/images
 	// for details.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Image *Image `json:"image,omitempty"`
 
 	// The security context for this container. See
 	// https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.26/#securitycontext-v1-core
 	// for details.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
 
 	// The compute resources required by this container. See
 	// https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
 	// for details.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// Initial SDS container configuration.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Bootstrap *SdsBootstrap `json:"bootstrap,omitempty"`
 }
 
@@ -475,12 +363,12 @@ func (in *SdsContainer) GetBootstrap() *SdsBootstrap {
 	return in.Bootstrap
 }
 
-// SdsBootstrap configures the SDS instance that is provisioned from a Kubernetes Gateway.
+// Configuration for the SDS instance that is provisioned from a Kubernetes Gateway.
 type SdsBootstrap struct {
 	// Log level for SDS. Options include "info", "debug", "warn", "error", "panic" and "fatal".
 	// Default level is "info".
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	LogLevel *string `json:"logLevel,omitempty"`
 }
 
@@ -491,19 +379,19 @@ func (in *SdsBootstrap) GetLogLevel() *string {
 	return in.LogLevel
 }
 
-// IstioIntegration configures the Istio integration settings used by a kgateway's data plane (Envoy proxy instance)
+// Configuration for the Istio integration settings used by a Gloo Gateway's data plane (Envoy proxy instance)
 type IstioIntegration struct {
 	// Configuration for the container running istio-proxy.
 	// Note that if Istio integration is not enabled, the istio container will not be injected
 	// into the gateway proxy deployment.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	IstioProxyContainer *IstioContainer `json:"istioProxyContainer,omitempty"`
 
 	// do not use slice of pointers: https://github.com/kubernetes/code-generator/issues/166
 	// Override the default Istio sidecar in gateway-proxy with a custom container.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	CustomSidecars []corev1.Container `json:"customSidecars,omitempty"`
 }
 
@@ -521,48 +409,48 @@ func (in *IstioIntegration) GetCustomSidecars() []corev1.Container {
 	return in.CustomSidecars
 }
 
-// IstioContainer configures the container running the istio-proxy.
+// Configuration for the container running the istio-proxy.
 type IstioContainer struct {
 	// The envoy container image. See
 	// https://kubernetes.io/docs/concepts/containers/images
 	// for details.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Image *Image `json:"image,omitempty"`
 
 	// The security context for this container. See
 	// https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.26/#securitycontext-v1-core
 	// for details.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
 
 	// The compute resources required by this container. See
 	// https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
 	// for details.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// Log level for istio-proxy. Options include "info", "debug", "warning", and "error".
 	// Default level is info Default is "warning".
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	LogLevel *string `json:"logLevel,omitempty"`
 
 	// The address of the istio discovery service. Defaults to "istiod.istio-system.svc:15012".
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	IstioDiscoveryAddress *string `json:"istioDiscoveryAddress,omitempty"`
 
 	// The mesh id of the istio mesh. Defaults to "cluster.local".
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	IstioMetaMeshId *string `json:"istioMetaMeshId,omitempty"`
 
 	// The cluster id of the istio cluster. Defaults to "Kubernetes".
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	IstioMetaClusterId *string `json:"istioMetaClusterId,omitempty"`
 }
 
@@ -619,22 +507,22 @@ func (in *IstioContainer) GetIstioMetaClusterId() *string {
 type StatsConfig struct {
 	// Whether to expose metrics annotations and ports for scraping metrics.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Enabled *bool `json:"enabled,omitempty"`
 
 	// The Envoy stats endpoint to which the metrics are written
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	RoutePrefixRewrite *string `json:"routePrefixRewrite,omitempty"`
 
 	// Enables an additional route to the stats cluster defaulting to /stats
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	EnableStatsRoute *bool `json:"enableStatsRoute,omitempty"`
 
 	// The Envoy stats endpoint with general metrics for the additional stats route
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	StatsRoutePrefixRewrite *string `json:"statsRoutePrefixRewrite,omitempty"`
 }
 
@@ -670,40 +558,40 @@ func (in *StatsConfig) GetStatsRoutePrefixRewrite() *string {
 type AiExtension struct {
 	// Whether to enable the extension.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Enabled *bool `json:"enabled,omitempty"`
 
 	// The extension's container image. See
 	// https://kubernetes.io/docs/concepts/containers/images
 	// for details.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Image *Image `json:"image,omitempty"`
 
 	// The security context for this container. See
 	// https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.26/#securitycontext-v1-core
 	// for details.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
 
 	// The compute resources required by this container. See
 	// https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
 	// for details.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// do not use slice of pointers: https://github.com/kubernetes/code-generator/issues/166
 
 	// The extension's container environment variables.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
 	// The extension's container ports.
 	//
-	// +optional
+	// +kubebuilder:validation:Optional
 	Ports []corev1.ContainerPort `json:"ports,omitempty"`
 
 	// Additional stats config for AI Extension.
@@ -722,11 +610,6 @@ type AiExtension struct {
 	//       metadataKey: "principal:iss"
 	// ```
 	Stats *AiExtensionStats `json:"stats,omitempty"`
-
-	// Additional OTel tracing config for AI Extension.
-	//
-	// +optional
-	Tracing *AiExtensionTrace `json:"tracing,omitempty"`
 }
 
 func (in *AiExtension) GetEnabled() *bool {
@@ -778,21 +661,14 @@ func (in *AiExtension) GetStats() *AiExtensionStats {
 	return in.Stats
 }
 
-func (in *AiExtension) GetTracing() *AiExtensionTrace {
-	if in == nil {
-		return nil
-	}
-	return in.Tracing
-}
-
 type AiExtensionStats struct {
 	// Set of custom labels to be added to the request metrics.
 	// These will be added on each request which goes through the AI Extension.
 	// +optional
-	CustomLabels []CustomLabel `json:"customLabels,omitempty"`
+	CustomLabels []*CustomLabel `json:"customLabels,omitempty"`
 }
 
-func (in *AiExtensionStats) GetCustomLabels() []CustomLabel {
+func (in *AiExtensionStats) GetCustomLabels() []*CustomLabel {
 	if in == nil {
 		return nil
 	}
@@ -809,6 +685,7 @@ type CustomLabel struct {
 	// the envoy JWT filter namespace.
 	// This can also be used in combination with early_transformations to insert custom data.
 	// +optional
+	//
 	// +kubebuilder:validation:Enum=envoy.filters.http.jwt_authn;io.solo.transformation
 	MetadataNamespace *string `json:"metadataNamespace,omitempty"`
 
@@ -854,309 +731,4 @@ func (in *CustomLabel) GetKeyDelimiter() *string {
 		return nil
 	}
 	return in.KeyDelimiter
-}
-
-// AiExtensionTrace defines the tracing configuration for the AI extension
-type AiExtensionTrace struct {
-	// EndPoint specifies the URL of the OTLP Exporter for traces.
-	// Example: "http://my-otel-collector.svc.cluster.local:4317"
-	// https://opentelemetry.io/docs/languages/sdk-configuration/otlp-exporter/#otel_exporter_otlp_traces_endpoint
-	//
-	// +required
-	EndPoint gwv1.AbsoluteURI `json:"endpoint"`
-
-	// Sampler defines the sampling strategy for OpenTelemetry traces.
-	// Sampling helps in reducing the volume of trace data by selectively
-	// recording only a subset of traces.
-	// https://opentelemetry.io/docs/languages/sdk-configuration/general/#otel_traces_sampler
-	//
-	// +optional
-	Sampler *OTelTracesSampler `json:"sampler,omitempty"`
-
-	// OTLPTimeout specifies timeout configurations for OTLP (OpenTelemetry Protocol) exports.
-	// It allows setting general and trace-specific timeouts for sending data.
-	// https://opentelemetry.io/docs/languages/sdk-configuration/otlp-exporter/#otel_exporter_otlp_traces_timeout
-	//
-	// +optional
-	// +kubebuilder:validation:XValidation:rule="matches(self, '^([0-9]{1,5}(h|m|s|ms)){1,4}$')",message="invalid duration value"
-	Timeout *metav1.Duration `json:"timeout,omitempty"`
-
-	// OTLPProtocol specifies the protocol to be used for OTLP exports.
-	// This determines how tracing data is serialized and transported (e.g., gRPC, HTTP/Protobuf).
-	// https://opentelemetry.io/docs/languages/sdk-configuration/otlp-exporter/#otel_exporter_otlp_traces_protocol
-	//
-	// +optional
-	// +kubebuilder:validation:Enum=grpc;http/protobuf;http/json
-	Protocol *OTLPTracesProtocolType `json:"protocol,omitempty"`
-}
-
-func (in *AiExtensionTrace) GetTimeout() *metav1.Duration {
-	if in == nil {
-		return nil
-	}
-	return in.Timeout
-}
-
-// OTelTracesSamplerType defines the available OpenTelemetry trace sampler types.
-// These samplers determine which traces are recorded and exported.
-type OTelTracesSamplerType string
-
-const (
-	// OTelTracesSamplerAlwaysOn enables always-on sampling.
-	// All traces will be recorded and exported. Useful for development or low-traffic systems.
-	OTelTracesSamplerAlwaysOn OTelTracesSamplerType = "alwaysOn"
-
-	// OTelTracesSamplerAlwaysOff enables always-off sampling.
-	// No traces will be recorded or exported. Effectively disables tracing.
-	OTelTracesSamplerAlwaysOff OTelTracesSamplerType = "alwaysOff"
-
-	// OTelTracesSamplerTraceidratio enables trace ID ratio based sampling.
-	// Traces are sampled based on a configured probability derived from their trace ID.
-	OTelTracesSamplerTraceidratio OTelTracesSamplerType = "traceidratio"
-
-	// OTelTracesSamplerParentbasedAlwaysOn enables parent-based always-on sampling.
-	// If a parent span exists and is sampled, the child span is also sampled.
-	OTelTracesSamplerParentbasedAlwaysOn OTelTracesSamplerType = "parentbasedAlwaysOn"
-
-	// OTelTracesSamplerParentbasedAlwaysOff enables parent-based always-off sampling.
-	// If a parent span exists and is not sampled, the child span is also not sampled.
-	OTelTracesSamplerParentbasedAlwaysOff OTelTracesSamplerType = "parentbasedAlwaysOff"
-
-	// OTelTracesSamplerParentbasedTraceidratio enables parent-based trace ID ratio sampling.
-	// If a parent span exists and is sampled, the child span is also sampled.
-	OTelTracesSamplerParentbasedTraceidratio OTelTracesSamplerType = "parentbasedTraceidratio"
-)
-
-func (otelSamplerType OTelTracesSamplerType) String() string {
-	switch otelSamplerType {
-	case OTelTracesSamplerAlwaysOn:
-		return "alwaysOn"
-	case OTelTracesSamplerAlwaysOff:
-		return "alwaysOff"
-	case OTelTracesSamplerTraceidratio:
-		return "traceidratio"
-	case OTelTracesSamplerParentbasedAlwaysOn:
-		return "parentbasedAlwaysOn"
-	case OTelTracesSamplerParentbasedAlwaysOff:
-		return "parentbasedAlwaysOff"
-	case OTelTracesSamplerParentbasedTraceidratio:
-		return "parentbasedTraceidratio"
-	default:
-		return ""
-	}
-}
-
-// OTelTracesSampler defines the configuration for an OpenTelemetry trace sampler.
-// It combines the sampler type with any required arguments for that type.
-type OTelTracesSampler struct {
-	// SamplerType specifies the type of sampler to use (default value: "parentbased_always_on").
-	// Refer to OTelTracesSamplerType for available options.
-	// https://opentelemetry.io/docs/languages/sdk-configuration/general/#otel_traces_sampler
-	//
-	//+optional
-	// +kubebuilder:validation:Enum=alwaysOn;alwaysOff;traceidratio;parentbasedAlwaysOn;parentbasedAlwaysOff;parentbasedTraceidratio
-	SamplerType *OTelTracesSamplerType `json:"type,omitempty"`
-	// SamplerArg provides an argument for the chosen sampler type.
-	// For "traceidratio" or "parentbased_traceidratio" samplers: Sampling probability, a number in the [0..1] range,
-	// e.g. 0.25. Default is 1.0 if unset.
-	// https://opentelemetry.io/docs/languages/sdk-configuration/general/#otel_traces_sampler_arg
-	//
-	//+optional
-	// +kubebuilder:validation:Pattern=`^0(\.\d+)?|1(\.0+)?$`
-	SamplerArg *string `json:"arg,omitempty"`
-}
-
-func (in *AiExtensionTrace) GetSampler() *OTelTracesSampler {
-	if in == nil {
-		return nil
-	}
-	return in.Sampler
-}
-
-func (in *AiExtensionTrace) GetSamplerType() *string {
-	if in == nil || in.Sampler == nil || in.Sampler.SamplerType == nil {
-		return nil
-	}
-	value := in.Sampler.SamplerType.String()
-	return &value
-}
-
-func (in *AiExtensionTrace) GetSamplerArg() *string {
-	if in == nil || in.Sampler == nil {
-		return nil
-	}
-	return in.GetSampler().SamplerArg
-}
-
-// OTLPTracesProtocolType defines the supported protocols for OTLP exporter.
-type OTLPTracesProtocolType string
-
-const (
-	// OTLPTracesProtocolTypeGrpc specifies OTLP over gRPC protocol.
-	// This is typically the most efficient protocol for OpenTelemetry data transfer.
-	OTLPTracesProtocolTypeGrpc OTLPTracesProtocolType = "grpc"
-	// OTLPTracesProtocolTypeProtobuf specifies OTLP over HTTP with Protobuf serialization.
-	// Data is sent via HTTP POST requests with Protobuf message bodies.
-	OTLPTracesProtocolTypeProtobuf OTLPTracesProtocolType = "http/protobuf"
-	// OTLPTracesProtocolTypeJson specifies OTLP over HTTP with JSON serialization.
-	// Data is sent via HTTP POST requests with JSON message bodies.
-	OTLPTracesProtocolTypeJson OTLPTracesProtocolType = "http/json"
-)
-
-func (in *AiExtensionTrace) GetOTLPProtocolType() *string {
-	if in == nil || in.Protocol == nil {
-		return nil
-	}
-	value := in.Protocol.String()
-	return &value
-}
-
-func (otelProtocolType OTLPTracesProtocolType) String() string {
-	switch otelProtocolType {
-	case OTLPTracesProtocolTypeGrpc:
-		return "grpc"
-	case OTLPTracesProtocolTypeProtobuf:
-		return "http/protobuf"
-	case OTLPTracesProtocolTypeJson:
-		return "http/json"
-	default:
-		return ""
-	}
-}
-
-// OTLPTransportSecurityMode defines the transport security options for OTLP connections.
-type OTLPTransportSecurityMode string
-
-const (
-	// OTLPTransportSecuritySecure enables TLS (client transport security) for OTLP connections.
-	// This means the client will verify the server's certificate.
-	OTLPTransportSecuritySecure OTLPTransportSecurityMode = "secure"
-
-	// OTLPTransportSecurityInsecure disables TLS for OTLP connections,
-	// meaning certificate verification is skipped. This is generally not recommended
-	// for production environments due to security risks.
-	OTLPTransportSecurityInsecure OTLPTransportSecurityMode = "insecure"
-)
-
-func (otelTransportSecurityMode OTLPTransportSecurityMode) String() string {
-	switch otelTransportSecurityMode {
-	case OTLPTransportSecuritySecure:
-		return "secure"
-	case OTLPTransportSecurityInsecure:
-		return "insecure"
-	default:
-		return ""
-	}
-}
-
-// Agentgateway configures the agentgateway dataplane integration to be enabled if the `agentgateway` GatewayClass is used.
-type Agentgateway struct {
-	// Whether to enable the extension.
-	//
-	// +optional
-	Enabled *bool `json:"enabled,omitempty"`
-
-	// Log level for the agentgateway. Defaults to info.
-	// Levels include "trace", "debug", "info", "error", "warn". See: https://docs.rs/tracing/latest/tracing/struct.Level.html
-	//
-	// +optional
-	LogLevel *string `json:"logLevel,omitempty"`
-
-	// The agentgateway container image. See
-	// https://kubernetes.io/docs/concepts/containers/images
-	// for details.
-	//
-	// Default values, which may be overridden individually:
-	//
-	//	registry: ghcr.io/agentgateway
-	//	repository: agentgateway
-	//	tag: <agentgateway version>
-	//	pullPolicy: IfNotPresent
-	//
-	// +optional
-	Image *Image `json:"image,omitempty"`
-
-	// The security context for this container. See
-	// https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.26/#securitycontext-v1-core
-	// for details.
-	//
-	// +optional
-	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
-
-	// The compute resources required by this container. See
-	// https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
-	// for details.
-	//
-	// +optional
-	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
-
-	// do not use slice of pointers: https://github.com/kubernetes/code-generator/issues/166
-
-	// The container environment variables.
-	//
-	// +optional
-	Env []corev1.EnvVar `json:"env,omitempty"`
-
-	// Name of the custom configmap to use instead of the default generated one.
-	// When set, the agent gateway will use this configmap instead of creating the default one.
-	// The configmap must contain a 'config.yaml' key with the agent gateway configuration.
-	//
-	// +optional
-	CustomConfigMapName *string `json:"customConfigMapName,omitempty"`
-
-	// Additional volume mounts to add to the container. See
-	// https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.26/#volumemount-v1-core
-	// for details.
-	//
-	// +optional
-	ExtraVolumeMounts []corev1.VolumeMount `json:"extraVolumeMounts,omitempty"`
-}
-
-func (in *Agentgateway) GetEnabled() *bool {
-	if in == nil {
-		return nil
-	}
-	return in.Enabled
-}
-
-func (in *Agentgateway) GetLogLevel() *string {
-	if in == nil {
-		return nil
-	}
-	return in.LogLevel
-}
-
-func (in *Agentgateway) GetImage() *Image {
-	if in == nil {
-		return nil
-	}
-	return in.Image
-}
-
-func (in *Agentgateway) GetSecurityContext() *corev1.SecurityContext {
-	if in == nil {
-		return nil
-	}
-	return in.SecurityContext
-}
-
-func (in *Agentgateway) GetResources() *corev1.ResourceRequirements {
-	if in == nil {
-		return nil
-	}
-	return in.Resources
-}
-
-func (in *Agentgateway) GetEnv() []corev1.EnvVar {
-	if in == nil {
-		return nil
-	}
-	return in.Env
-}
-
-func (in *Agentgateway) GetCustomConfigMapName() *string {
-	if in == nil {
-		return nil
-	}
-	return in.CustomConfigMapName
 }

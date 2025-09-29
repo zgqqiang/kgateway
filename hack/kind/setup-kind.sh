@@ -6,25 +6,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 # The name of the kind cluster to deploy to
 CLUSTER_NAME="${CLUSTER_NAME:-kind}"
 # The version of the Node Docker image to use for booting the cluster
-CLUSTER_NODE_VERSION="${CLUSTER_NODE_VERSION:-v1.33.1@sha256:050072256b9a903bd914c0b2866828150cb229cea0efe5892e2b644d5dd3b34f}"
+CLUSTER_NODE_VERSION="${CLUSTER_NODE_VERSION:-v1.31.0}"
 # The version used to tag images
 VERSION="${VERSION:-1.0.0-ci1}"
 # Skip building docker images if we are testing a released version
 SKIP_DOCKER="${SKIP_DOCKER:-false}"
 # Stop after creating the kind cluster
 JUST_KIND="${JUST_KIND:-false}"
+# Set the default image variant to standard
+IMAGE_VARIANT="${IMAGE_VARIANT:-standard}"
 # If true, run extra steps to set up k8s gateway api conformance test environment
 CONFORMANCE="${CONFORMANCE:-false}"
 # The version of the k8s gateway api conformance tests to run. Requires CONFORMANCE=true
 CONFORMANCE_VERSION="${CONFORMANCE_VERSION:-$(go list -m sigs.k8s.io/gateway-api | awk '{print $2}')}"
 # The channel of the k8s gateway api conformance tests to run. Requires CONFORMANCE=true
 CONFORMANCE_CHANNEL="${CONFORMANCE_CHANNEL:-"experimental"}"
-# The version of the k8s gateway api inference extension CRDs to install. Requires CONFORMANCE=true
-GIE_CRD_VERSION="${GIE_CRD_VERSION:-$(go list -m sigs.k8s.io/gateway-api-inference-extension | awk '{print $2}')}"
 # The kind CLI to use. Defaults to the latest version from the kind repo.
 KIND="${KIND:-go tool kind}"
-# The helm CLI to use. Defaults to the latest version from the helm repo.
-HELM="${HELM:-go tool helm}"
 # If true, use localstack for lambda functions
 LOCALSTACK="${LOCALSTACK:-false}"
 
@@ -62,9 +60,11 @@ if [[ $SKIP_DOCKER == 'true' ]]; then
   # TODO(tim): refactor the Makefile & CI scripts so we're loading local
   # charts to real helm repos, and then we can remove this block.
   echo "SKIP_DOCKER=true, not building images or chart"
+  helm repo add gloo https://storage.googleapis.com/solo-public-helm
+  helm repo update
 else
   # 2. Make all the docker images and load them to the kind cluster
-  VERSION=$VERSION CLUSTER_NAME=$CLUSTER_NAME make kind-build-and-load
+  VERSION=$VERSION CLUSTER_NAME=$CLUSTER_NAME IMAGE_VARIANT=$IMAGE_VARIANT make kind-build-and-load
 
   # 3. Build the test helm chart, ensuring we have a chart in the `_test` folder
   VERSION=$VERSION make package-kgateway-charts
@@ -72,10 +72,6 @@ else
   # 4. Build the mock ai provider docker image and load it to the kind cluster when the ai extension setup is enabled
   if [[ $CONFORMANCE == "true" ]]; then
     VERSION=$VERSION make kind-build-and-load-test-ai-provider
-  fi
-
-  if [[ $AGENTGATEWAY == "true" ]]; then
-    VERSION=$VERSION make kind-build-and-load-test-a2a-agent
   fi
 fi
 
@@ -88,23 +84,16 @@ fi
 # alternatives like running a series of `kubectl apply -f <url>` commands. This
 # approach is largely necessary since upstream hasn't adopted a helm chart for
 # the CRDs yet, or won't be for the foreseeable future.
-if [[ $CONFORMANCE_CHANNEL == "standard" ]]; then
-  kubectl apply --kustomize "https://github.com/kubernetes-sigs/gateway-api/config/crd?ref=$CONFORMANCE_VERSION"
-else
-  kubectl apply --kustomize "https://github.com/kubernetes-sigs/gateway-api/config/crd/$CONFORMANCE_CHANNEL?ref=$CONFORMANCE_VERSION"
-fi
+kubectl apply --kustomize "https://github.com/kubernetes-sigs/gateway-api/config/crd/$CONFORMANCE_CHANNEL?ref=$CONFORMANCE_VERSION"
 
-# 7. Apply the Kubernetes Gateway API Inference Extension CRDs
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$GIE_CRD_VERSION/manifests.yaml
-
-# 8. Conformance test setup
+# 7. Conformance test setup
 if [[ $CONFORMANCE == "true" ]]; then
   echo "Running conformance test setup"
 
   . $SCRIPT_DIR/setup-metalllb-on-kind.sh
 fi
 
-# 9. Setup localstack
+# 7. Setup localstack
 if [[ $LOCALSTACK == "true" ]]; then
   echo "Setting up localstack"
   . $SCRIPT_DIR/setup-localstack.sh

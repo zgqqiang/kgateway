@@ -13,8 +13,8 @@ import (
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	v1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	ir "github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
 	query "github.com/kgateway-dev/kgateway/v2/internal/kgateway/query"
-	ir "github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/ir"
 )
 
 // MockGatewayQueries is a mock of GatewayQueries interface.
@@ -55,7 +55,7 @@ func (mr *MockGatewayQueriesMockRecorder) GetRouteChain(arg0, arg1, arg2, arg3, 
 }
 
 // GetRoutesForGateway mocks base method.
-func (m *MockGatewayQueries) GetRoutesForGateway(arg0 krt.HandlerContext, arg1 context.Context, arg2 *ir.Gateway) (*query.RoutesForGwResult, error) {
+func (m *MockGatewayQueries) GetRoutesForGateway(arg0 krt.HandlerContext, arg1 context.Context, arg2 *v1.Gateway) (*query.RoutesForGwResult, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetRoutesForGateway", arg0, arg1, arg2)
 	ret0, _ := ret[0].(*query.RoutesForGwResult)

@@ -12,12 +12,11 @@ import (
 	gwv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	gwv1a3 "sigs.k8s.io/gateway-api/apis/v1alpha3"
 	gwv1b1 "sigs.k8s.io/gateway-api/apis/v1beta1"
-	gwxv1a1 "sigs.k8s.io/gateway-api/apisx/v1alpha1"
 
 	kgwv1a1 "github.com/kgateway-dev/kgateway/v2/api/v1alpha1"
 )
 
-// SchemeBuilder contains all the Schemes for registering the CRDs with which kgateway interacts.
+// SchemeBuilder contains all the Schemes for registering the CRDs with which Gloo Gateway interacts.
 // We share one SchemeBuilder as there's no harm in registering all I/O types internally.
 var SchemeBuilder = runtime.SchemeBuilder{
 	// K8s Gateway API resources
@@ -25,7 +24,6 @@ var SchemeBuilder = runtime.SchemeBuilder{
 	gwv1a2.Install,
 	gwv1a3.Install,
 	gwv1b1.Install,
-	gwxv1a1.Install,
 
 	// Kubernetes Core resources
 	corev1.AddToScheme,
@@ -35,7 +33,7 @@ var SchemeBuilder = runtime.SchemeBuilder{
 	// Register the apiextensions API group
 	apiextensionsv1.AddToScheme,
 
-	// kgateway custom resources
+	// Solo Kubernetes Gateway API resources
 	kgwv1a1.Install,
 }
 
@@ -43,7 +41,7 @@ func AddToScheme(s *runtime.Scheme) error {
 	return SchemeBuilder.AddToScheme(s)
 }
 
-// DefaultScheme returns a scheme with all the types registered for kgateway
+// DefaultScheme returns a scheme with all the types registered for Gloo Gateway
 // We intentionally do not perform this operation in an init!!
 // See https://github.com/kgateway-dev/kgateway/pull/9692 for context
 func DefaultScheme() *runtime.Scheme {
@@ -61,9 +59,6 @@ func GatewayScheme() *runtime.Scheme {
 	}
 	if err := gwv1b1.Install(s); err != nil {
 		panic(fmt.Sprintf("Failed to install gateway v1beta1 scheme: %v", err))
-	}
-	if err := gwxv1a1.Install(s); err != nil {
-		panic(fmt.Sprintf("Failed to install gateway experimental v1alpha1 scheme: %v", err))
 	}
 	return s
 }

@@ -1,3 +1,3 @@
 # Documentation
 
-Please see the [kgateway.dev](https://github.com/kgateway-dev/kgateway.dev) repo to file issues or contribute to documentation.
+// TODO(nfuden): link to docs pipeline setups

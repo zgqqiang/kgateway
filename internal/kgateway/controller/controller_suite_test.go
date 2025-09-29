@@ -11,12 +11,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/onsi/gomega/gleak"
-	"github.com/onsi/gomega/types"
-	"istio.io/istio/pkg/kube"
-	istiosets "istio.io/istio/pkg/util/sets"
 	rbacv1 "k8s.io/api/rbac/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/rest"
@@ -31,46 +26,28 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
-	inf "sigs.k8s.io/gateway-api-inference-extension/api/v1"
-	apiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	infextv1a2 "sigs.k8s.io/gateway-api-inference-extension/api/v1alpha2"
 
-	"github.com/kgateway-dev/kgateway/v2/api/settings"
-	"github.com/kgateway-dev/kgateway/v2/api/v1alpha1"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/controller"
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/registry"
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/krtcollections"
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/setup"
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/wellknown"
-	"github.com/kgateway-dev/kgateway/v2/pkg/client/clientset/versioned"
-	"github.com/kgateway-dev/kgateway/v2/pkg/deployer"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/collections"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/krtutil"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/deployer"
 	"github.com/kgateway-dev/kgateway/v2/pkg/schemes"
-	"github.com/kgateway-dev/kgateway/v2/test/gomega/assertions"
 )
 
 const (
-	gatewayClassName            = "clsname"
-	altGatewayClassName         = "clsname-alt"
-	selfManagedGatewayClassName = "clsname-selfmanaged"
-	gatewayControllerName       = "kgateway.dev/kgateway"
-	agwControllerName           = "kgateway.dev/agentgateway"
-	defaultNamespace            = "default"
+	gatewayClassName      = "clsname"
+	altGatewayClassName   = "clsname-alt"
+	gatewayControllerName = "kgateway.dev/kgateway"
+	defaultNamespace      = "default"
 )
 
 var (
-	cfg             *rest.Config
-	k8sClient       client.Client
-	testEnv         *envtest.Environment
-	ctx             context.Context
-	cancel          context.CancelFunc
-	kubeconfig      string
-	gwClasses       = sets.New(gatewayClassName, altGatewayClassName, selfManagedGatewayClassName)
-	gwControllerMap = map[string]string{
-		gatewayClassName:            gatewayControllerName,
-		altGatewayClassName:         agwControllerName,
-		selfManagedGatewayClassName: gatewayControllerName,
-	}
+	cfg          *rest.Config
+	k8sClient    client.Client
+	testEnv      *envtest.Environment
+	ctx          context.Context
+	cancel       context.CancelFunc
+	kubeconfig   string
+	gwClasses    = sets.New(gatewayClassName, altGatewayClassName)
 	scheme       *runtime.Scheme
 	inferenceExt *deployer.InferenceExtInfo
 )
@@ -95,7 +72,7 @@ var _ = BeforeSuite(func() {
 	By("bootstrapping test environment")
 	// Create a scheme and add both Gateway and InferencePool types.
 	scheme = schemes.GatewayScheme()
-	err := inf.Install(scheme)
+	err := infextv1a2.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 	// Required to deploy endpoint picker RBAC resources.
 	err = rbacv1.AddToScheme(scheme)
@@ -172,20 +149,10 @@ func generateKubeConfiguration(restconfig *rest.Config) string {
 	return tmpfile.Name()
 }
 
-type fakeDiscoveryNamespaceFilter struct{}
-
-func (f fakeDiscoveryNamespaceFilter) Filter(obj any) bool {
-	// this is a fake filter, so we just return true
-	return true
-}
-
-func (f fakeDiscoveryNamespaceFilter) AddHandler(func(selected, deselected istiosets.String)) {
-}
-
 func createManager(
 	parentCtx context.Context,
 	inferenceExt *deployer.InferenceExtInfo,
-	classConfigs map[string]*deployer.GatewayClassInfo,
+	classConfigs map[string]*controller.ClassInfo,
 ) (context.CancelFunc, error) {
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
@@ -209,62 +176,31 @@ func createManager(
 		return nil, err
 	}
 
-	ctx, cancel := context.WithCancel(parentCtx)
-	kubeClient, _ := setup.CreateKubeClient(cfg)
 	gwCfg := controller.GatewayConfig{
-		Mgr:               mgr,
-		ControllerName:    gatewayControllerName,
-		AgwControllerName: agwControllerName,
-		AutoProvision:     true,
+		Mgr:            mgr,
+		ControllerName: gatewayControllerName,
+		AutoProvision:  true,
 		ImageInfo: &deployer.ImageInfo{
 			Registry: "ghcr.io/kgateway-dev",
 			Tag:      "latest",
 		},
-		DiscoveryNamespaceFilter: fakeDiscoveryNamespaceFilter{},
-		CommonCollections:        newCommonCols(ctx, kubeClient),
 	}
-	if err := controller.NewBaseGatewayController(parentCtx, gwCfg, nil); err != nil {
-		cancel()
-		return nil, err
-	}
-	if err := mgr.GetClient().Create(ctx, &v1alpha1.GatewayParameters{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      selfManagedGatewayClassName,
-			Namespace: "default",
-		},
-		Spec: v1alpha1.GatewayParametersSpec{
-			SelfManaged: &v1alpha1.SelfManagedGateway{},
-		},
-	}); client.IgnoreAlreadyExists(err) != nil {
-		cancel()
+	if err := controller.NewBaseGatewayController(parentCtx, gwCfg); err != nil {
 		return nil, err
 	}
 
 	// Use the default & alt GCs when no class configs are provided.
 	if classConfigs == nil {
-		classConfigs = map[string]*deployer.GatewayClassInfo{}
-		classConfigs[altGatewayClassName] = &deployer.GatewayClassInfo{
-			Description:    "alt gateway class",
-			ControllerName: agwControllerName, // custom controller name (not default)
+		classConfigs = map[string]*controller.ClassInfo{}
+		classConfigs[altGatewayClassName] = &controller.ClassInfo{
+			Description: "alt gateway class",
 		}
-		classConfigs[gatewayClassName] = &deployer.GatewayClassInfo{
-			Description:    "default gateway class",
-			ControllerName: gatewayControllerName,
-		}
-		classConfigs[selfManagedGatewayClassName] = &deployer.GatewayClassInfo{
-			Description: "self managed gw",
-			ParametersRef: &apiv1.ParametersReference{
-				Group:     apiv1.Group(wellknown.GatewayParametersGVK.Group),
-				Kind:      apiv1.Kind(wellknown.GatewayParametersGVK.Kind),
-				Name:      selfManagedGatewayClassName,
-				Namespace: ptr.To(apiv1.Namespace("default")),
-			},
-			// no controller name set, uses default
+		classConfigs[gatewayClassName] = &controller.ClassInfo{
+			Description: "default gateway class",
 		}
 	}
 
 	if err := controller.NewGatewayClassProvisioner(mgr, gatewayControllerName, classConfigs); err != nil {
-		cancel()
 		return nil, err
 	}
 
@@ -273,11 +209,11 @@ func createManager(
 		ControllerName: gatewayControllerName,
 		InferenceExt:   inferenceExt,
 	}
-	if err := controller.NewBaseInferencePoolController(parentCtx, poolCfg, &gwCfg, nil); err != nil {
-		cancel()
+	if err := controller.NewBaseInferencePoolController(parentCtx, poolCfg, &gwCfg); err != nil {
 		return nil, err
 	}
 
+	ctx, cancel := context.WithCancel(parentCtx)
 	go func() {
 		defer GinkgoRecover()
 		kubeconfig = generateKubeConfiguration(cfg)
@@ -285,47 +221,5 @@ func createManager(
 		Expect(mgr.Start(ctx)).ToNot(HaveOccurred())
 	}()
 
-	return func() {
-		cancel()
-		kubeClient.Shutdown()
-	}, nil
-}
-
-func newCommonCols(ctx context.Context, kubeClient kube.Client) *collections.CommonCollections {
-	krtopts := krtutil.NewKrtOptions(ctx.Done(), nil)
-	cli, err := versioned.NewForConfig(cfg)
-	if err != nil {
-		Expect(err).ToNot(HaveOccurred())
-	}
-
-	settings, err := settings.BuildSettings()
-	if err != nil {
-		Expect(err).ToNot(HaveOccurred())
-	}
-	commoncol, err := collections.NewCommonCollections(ctx, krtopts, kubeClient, cli, nil, gatewayControllerName, *settings)
-	if err != nil {
-		Expect(err).ToNot(HaveOccurred())
-	}
-
-	plugins := registry.Plugins(ctx, commoncol, wellknown.DefaultWaypointClassName, *settings, nil)
-	plugins = append(plugins, krtcollections.NewBuiltinPlugin(ctx))
-	extensions := registry.MergePlugins(plugins...)
-
-	commoncol.InitPlugins(ctx, extensions, *settings)
-	kubeClient.RunAndWait(ctx.Done())
-	return commoncol
-}
-
-// Controller routines all in waiting state
-var allowedRunningGoroutines = []types.GomegaMatcher{
-	gleak.IgnoringTopFunction("sync.runtime_notifyListWait [sync.Cond.Wait]"),
-	gleak.IgnoringTopFunction("istio.io/istio/pkg/kube/krt.(*processorListener[...]).run [select]"),
-	gleak.IgnoringTopFunction("istio.io/istio/pkg/kube/krt.(*processorListener[...]).pop [select]"),
-	gleak.IgnoringTopFunction(`istio.io/istio/pkg/queue.(*queueImpl).Run.func2 [chan receive]`),
-}
-
-func waitForGoroutinesToFinish(monitor *assertions.GoRoutineMonitor) {
-	monitor.AssertNoLeaks(&assertions.AssertNoLeaksArgs{
-		AllowedRoutines: allowedRunningGoroutines,
-	})
+	return cancel, nil
 }

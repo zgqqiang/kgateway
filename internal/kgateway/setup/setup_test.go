@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,18 +14,20 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	envoyclusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
-	envoycorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	envoyendpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
-	envoylistenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
-	envoyroutev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	envoycluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	envoycore "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	envoyendpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	envoylistener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	envoy_config_route_v3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	envoyhttp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
-	envoy_service_discovery_v3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+	discovery_v3 "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"github.com/go-logr/zapr"
 	"github.com/google/go-cmp/cmp"
+	"github.com/solo-io/go-utils/contextutils"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
@@ -38,17 +40,20 @@ import (
 	istiokube "istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/kube/krt"
 	istioslices "istio.io/istio/pkg/slices"
-	"istio.io/istio/pkg/test/util/retry"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/yaml"
 
-	"github.com/kgateway-dev/kgateway/v2/api/settings"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/controller"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/settings"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/krtcollections"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/proxy_syncer"
-	"github.com/kgateway-dev/kgateway/v2/pkg/utils/envutils"
-	"github.com/kgateway-dev/kgateway/v2/test/envtestutil"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/setup"
 )
 
 func getAssetsDir(t *testing.T) string {
@@ -67,21 +72,11 @@ func getAssetsDir(t *testing.T) string {
 
 // testingWriter is a WriteSyncer that writes logs to testing.T.
 type testingWriter struct {
-	sync.RWMutex
-	t *testing.T
+	t atomic.Value
 }
 
 func (w *testingWriter) Write(p []byte) (n int, err error) {
-	w.RLock()
-	t := w.t // Capture the test context under lock
-	w.RUnlock()
-
-	// Check if we have a valid test context before trying to log
-	// This prevents races when controller goroutines outlive the test
-	if t != nil {
-		t.Log(string(p)) // Write the log to testing.T
-	}
-	// Always return success to avoid breaking the logging chain
+	w.t.Load().(*testing.T).Log(string(p)) // Write the log to testing.T
 	return len(p), nil
 }
 
@@ -90,10 +85,7 @@ func (w *testingWriter) Sync() error {
 }
 
 func (w *testingWriter) set(t *testing.T) {
-	w.Lock()
-	defer w.Unlock()
-
-	w.t = t
+	w.t.Store(t)
 }
 
 var (
@@ -104,18 +96,12 @@ var (
 // NewTestLogger creates a zap.Logger which can be used to write to *testing.T
 // on each test, set the *testing.T on the writer.
 func NewTestLogger() *zap.Logger {
-	var core zapcore.Core
-	// Only log controller-runtime and gRPC logs if LOG_LEVEL=debug, otherwise they are extremely noisy
-	level, err := zapcore.ParseLevel(envutils.GetOrDefault("LOG_LEVEL", "error", false))
-	if err != nil {
-		panic(fmt.Sprintf("failed to parse LOG_LEVEL: %v", err))
-	}
-	core = zapcore.NewCore(
+	core := zapcore.NewCore(
 		zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig()),
 		zapcore.AddSync(writer),
 		// Adjust log level as needed
 		// if a test assertion fails and logs or too noisy, change to zapcore.FatalLevel
-		level,
+		zapcore.DebugLevel,
 	)
 
 	return zap.New(core, zap.AddCaller())
@@ -123,10 +109,7 @@ func NewTestLogger() *zap.Logger {
 
 func init() {
 	log.SetLogger(zapr.NewLogger(logger))
-	// Use GRPC_GO_LOG_SEVERITY_LEVEL and GRPC_GO_LOG_VERBOSITY_LEVEL env vars to control gRPC logging
-	if logger.Level() == zapcore.DebugLevel {
-		grpclog.SetLoggerV2(grpclog.NewLoggerV2WithVerbosity(writer, writer, writer, 100))
-	}
+	grpclog.SetLoggerV2(grpclog.NewLoggerV2WithVerbosity(writer, writer, writer, 100))
 }
 
 func TestServiceEntry(t *testing.T) {
@@ -134,30 +117,8 @@ func TestServiceEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("can't get settings %v", err)
 	}
-	st.EnableIstioIntegration = true
 
-	// these exercise applying a DR to a ServiceEntry
-	runScenario(t, "testdata/serviceentry/dr", st)
-}
-
-func TestDestinationRule(t *testing.T) {
-	st, err := settings.BuildSettings()
-	st.EnableIstioIntegration = true
-	if err != nil {
-		t.Fatalf("can't get settings %v", err)
-	}
-	runScenario(t, "testdata/istio_destination_rule", st)
-}
-
-func TestTrafficDistribution(t *testing.T) {
-	st, err := settings.BuildSettings()
-	if err != nil {
-		t.Fatalf("can't get settings %v", err)
-	}
-	st.EnableIstioIntegration = true
-
-	// these exercise applying a DR to a ServiceEntry
-	runScenario(t, "testdata/traffic_distribution", st)
+	runScenario(t, "testdata/serviceentry", st)
 }
 
 func TestWithStandardSettings(t *testing.T) {
@@ -168,53 +129,69 @@ func TestWithStandardSettings(t *testing.T) {
 	runScenario(t, "testdata/standard", st)
 }
 
-func TestWithIstioAutomtlsSettings(t *testing.T) {
-	st, err := settings.BuildSettings()
-	st.EnableIstioIntegration = true
-	st.EnableIstioAutoMtls = true
-	if err != nil {
-		t.Fatalf("can't get settings %v", err)
-	}
-	runScenario(t, "testdata/istio_mtls", st)
-}
-
-func TestWithBindIpv6(t *testing.T) {
-	st, err := settings.BuildSettings()
-	st.ListenerBindIpv6 = true
-	if err != nil {
-		t.Fatalf("can't get settings %v", err)
-	}
-	runScenario(t, "testdata/listenerbind/v6", st)
-}
-
-func TestWithBindIpv4(t *testing.T) {
-	st, err := settings.BuildSettings()
-	st.ListenerBindIpv6 = false
-	if err != nil {
-		t.Fatalf("can't get settings %v", err)
-	}
-	runScenario(t, "testdata/listenerbind/v4", st)
-}
-
 func TestWithAutoDns(t *testing.T) {
 	st, err := settings.BuildSettings()
 	if err != nil {
 		t.Fatalf("can't get settings %v", err)
 	}
-	st.DnsLookupFamily = settings.DnsLookupFamilyAuto
+	st.DnsLookupFamily = "AUTO"
 
 	runScenario(t, "testdata/autodns", st)
 }
 
-func TestWithInferenceAPI(t *testing.T) {
+func TestScenarios(t *testing.T) {
 	st, err := settings.BuildSettings()
 	if err != nil {
 		t.Fatalf("can't get settings %v", err)
 	}
+	st.EnableIstioIntegration = true
+	st.EnableIstioAutoMtls = true
 	st.EnableInferExt = true
 	st.InferExtAutoProvision = true
 
-	runScenario(t, "testdata/inference_api", st)
+	runScenario(t, "testdata", st)
+}
+
+func policyFile() string {
+	p := `apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+- level: Metadata
+`
+	// write to temp file:
+	f, err := os.CreateTemp("", "policy.yaml")
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+	_, err = f.WriteString(p)
+	if err != nil {
+		panic(err)
+	}
+	return f.Name()
+}
+
+func addApiServerLogs(t *testing.T, testEnv *envtest.Environment) {
+	apiserverOut := new(bytes.Buffer)
+	apiserverErr := new(bytes.Buffer)
+
+	testEnv.ControlPlane = envtest.ControlPlane{
+		APIServer: &envtest.APIServer{
+			Out: apiserverOut,
+			Err: apiserverErr,
+		},
+	}
+	policy := policyFile()
+	t.Cleanup(func() {
+		os.Remove(policy)
+	})
+	args := testEnv.ControlPlane.APIServer.Configure()
+	args.Append("audit-log-path", "-")
+	args.Append("audit-policy-file", policy)
+	t.Cleanup(func() {
+		t.Log("apiserver out:", apiserverOut.String())
+		t.Log("apiserver err:", apiserverErr.String())
+	})
 }
 
 func TestPolicyUpdate(t *testing.T) {
@@ -247,10 +224,10 @@ spec:
   transformation:
     response:
       set:
-      - name: x-kgateway-response
-        value: '{{ request_header("x-kgateway-request") }}'
+      - name: x-solo-response
+        value: '{{ request_header("x-solo-request") }}'
       remove:
-      - x-kgateway-request`, `apiVersion: gateway.networking.k8s.io/v1beta1
+      - x-solo-request`, `apiVersion: gateway.networking.k8s.io/v1beta1
 kind: HTTPRoute
 metadata:
   name: happypath
@@ -282,10 +259,10 @@ spec:
   transformation:
     response:
       set:
-      - name: x-kgateway-response
-        value: '{{ request_header("x-kgateway-request123") }}'
+      - name: x-solo-response
+        value: '{{ request_header("x-solo-request123") }}'
       remove:
-      - x-kgateway-request321`)
+      - x-solo-request321`)
 
 		time.Sleep(time.Second / 2)
 
@@ -299,16 +276,13 @@ spec:
 			}
 		})
 
-		dump, err := dumper.Dump(t, ctx)
-		if err != nil {
-			t.Error(err)
-		}
+		dump := dumper.Dump(t, ctx)
 		pfc := dump.Routes[0].GetVirtualHosts()[0].GetRoutes()[0].GetTypedPerFilterConfig()
 		if len(pfc) != 1 {
 			t.Fatalf("expected 1 filter config, got %d", len(pfc))
 		}
-		if !bytes.Contains(slices.Collect(maps.Values(pfc))[0].Value, []byte("x-kgateway-request321")) {
-			t.Fatalf("expected filter config to contain x-kgateway-request321")
+		if !bytes.Contains(slices.Collect(maps.Values(pfc))[0].Value, []byte("x-solo-request321")) {
+			t.Fatalf("expected filter config to contain x-solo-request321")
 		}
 
 		t.Logf("%s finished", t.Name())
@@ -324,15 +298,13 @@ func runScenario(t *testing.T, scenarioDir string, globalSettings *settings.Sett
 		}
 		for _, f := range files {
 			// run tests with the yaml files (but not -out.yaml files)/s
+			parentT := t
 			if strings.HasSuffix(f.Name(), ".yaml") && !strings.HasSuffix(f.Name(), "-out.yaml") {
-				if os.Getenv("TEST_PREFIX") != "" && !strings.HasPrefix(f.Name(), os.Getenv("TEST_PREFIX")) {
-					continue
-				}
 				fullpath := filepath.Join(scenarioDir, f.Name())
 				t.Run(strings.TrimSuffix(f.Name(), ".yaml"), func(t *testing.T) {
 					writer.set(t)
 					t.Cleanup(func() {
-						writer.set(nil)
+						writer.set(parentT)
 					})
 					// sadly tests can't run yet in parallel, as kgateway will add all the k8s services as clusters. this means
 					// that we get test pollution.
@@ -359,28 +331,87 @@ func setupEnvTestAndRun(t *testing.T, globalSettings *settings.Settings, run fun
 		CRDDirectoryPaths: []string{
 			filepath.Join("..", "crds"),
 			filepath.Join("..", "..", "..", "install", "helm", "kgateway-crds", "templates"),
-			filepath.Join("testdata", "istio_crds_setup"),
+			filepath.Join("testdata", "istiocrds"),
 		},
 		ErrorIfCRDPathMissing: true,
 		// set assets dir so we can run without the makefile
 		BinaryAssetsDirectory: getAssetsDir(t),
-		// This often hangs (for unknown reasons); we don't need cleanup so just kill it almost instantly
-		ControlPlaneStopTimeout: time.Millisecond,
 		// web hook to add cluster ips to services
 	}
-	envtestutil.RunController(
-		t,
-		logger,
-		globalSettings,
-		testEnv,
-		nil,
-		[][]string{
-			{"default", "testdata/setup_yaml/setup.yaml"},
-			{"gwtest", "testdata/setup_yaml/pods.yaml"},
-		},
-		nil, // no tests need a validator right now.
-		run,
-	)
+	// Enable this if you want api server logs and audit logs.
+	if os.Getenv("DEBUG_APISERVER") == "true" {
+		addApiServerLogs(t, testEnv)
+	}
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ctx = contextutils.WithExistingLogger(ctx, logger.Sugar())
+
+	cfg, err := testEnv.Start()
+	if err != nil {
+		t.Fatalf("failed to get assets dir: %v", err)
+	}
+	t.Cleanup(func() { testEnv.Stop() })
+
+	kubeconfig := generateKubeConfiguration(t, cfg)
+	t.Log("kubeconfig:", kubeconfig)
+
+	client, err := istiokube.NewCLIClient(istiokube.NewClientConfigForRestConfig(cfg))
+	if err != nil {
+		t.Fatalf("failed to get init kube client: %v", err)
+	}
+
+	// apply settings/gwclass to the cluster
+	err = client.ApplyYAMLFiles("default", "testdata/setupyaml/setup.yaml")
+	if err != nil {
+		t.Fatalf("failed to apply yaml: %v", err)
+	}
+
+	// create the test ns
+	_, err = client.Kube().CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "gwtest"}}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("failed to create namespace: %v", err)
+	}
+
+	err = client.ApplyYAMLFiles("gwtest", "testdata/setupyaml/pods.yaml")
+	if err != nil {
+		t.Fatalf("failed to apply yaml: %v", err)
+	}
+	err = applyPodStatusFromFile(ctx, client, "gwtest", "testdata/setupyaml/pods.yaml")
+	if err != nil {
+		t.Fatalf("failed to apply pod status: %v", err)
+	}
+
+	// setup xDS server:
+	uniqueClientCallbacks, builder := krtcollections.NewUniquelyConnectedClients()
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("can't listen %v", err)
+	}
+	xdsPort := lis.Addr().(*net.TCPAddr).Port
+	snapCache, grpcServer := setup.NewControlPlaneWithListener(ctx, lis, uniqueClientCallbacks)
+	t.Cleanup(func() { grpcServer.Stop() })
+
+	setupOpts := &controller.SetupOpts{
+		Cache:          snapCache,
+		KrtDebugger:    new(krt.DebugHandler),
+		GlobalSettings: globalSettings,
+	}
+
+	// start kgateway
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		setup.StartKgatewayWithConfig(ctx, setupOpts, cfg, builder, nil)
+	}()
+	// give kgateway time to initialize so we don't get
+	// "kgateway not initialized" error
+	// this means that it attaches the pod collection to the unique client set collection.
+	time.Sleep(time.Second)
+	run(t, ctx, setupOpts.KrtDebugger, client, xdsPort)
 }
 
 func testScenario(
@@ -427,7 +458,7 @@ func testScenario(
 	testyaml := strings.ReplaceAll(string(testyamlbytes), gwname, testgwname)
 
 	yamlfile := filepath.Join(t.TempDir(), "test.yaml")
-	os.WriteFile(yamlfile, []byte(testyaml), 0o600)
+	os.WriteFile(yamlfile, []byte(testyaml), 0o644)
 
 	err = client.ApplyYAMLFiles("", yamlfile)
 
@@ -443,13 +474,12 @@ func testScenario(
 	if err != nil {
 		t.Fatalf("failed to apply yaml: %v", err)
 	}
-
-	err = envtestutil.ApplyPodStatusFromFile(ctx, client, "", yamlfile)
-	if err != nil {
-		t.Fatalf("failed to apply pod status: %v", err)
-	}
-
 	t.Log("applied yamls", t.Name())
+	// make sure all yamls reached the control plane
+	time.Sleep(time.Second)
+
+	dumper := newXdsDumper(t, ctx, xdsPort, testgwname)
+	t.Cleanup(dumper.Close)
 
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -459,28 +489,23 @@ func testScenario(
 		}
 	})
 
-	retry.UntilSuccessOrFail(t, func() error {
-		dumper := newXdsDumper(t, ctx, xdsPort, testgwname)
-		defer dumper.Close()
-		dump, err := dumper.Dump(t, ctx)
+	dump := dumper.Dump(t, ctx)
+	if len(dump.Listeners) == 0 {
+		j, _ := kdbg.MarshalJSON()
+		t.Logf("timed out waiting - krt state for test: %s %s", t.Name(), string(j))
+		t.Fatalf("timed out waiting for listeners")
+	}
+	if write {
+		t.Logf("writing out file")
+		// serialize xdsDump to yaml
+		d, err := dump.ToYaml()
 		if err != nil {
-			return err
+			t.Fatalf("failed to serialize xdsDump: %v", err)
 		}
-		if len(dump.Listeners) == 0 {
-			return fmt.Errorf("timed out waiting for listeners")
-		}
-		if write {
-			t.Logf("writing out file")
-			// serialize xdsDump to yaml
-			d, err := dump.ToYaml()
-			if err != nil {
-				return fmt.Errorf("failed to serialize xdsDump: %v", err)
-			}
-			os.WriteFile(fout, d, 0o600)
-			return fmt.Errorf("wrote out file - nothing to test")
-		}
-		return dump.Compare(expectedXdsDump)
-	}, retry.Converge(2), retry.Timeout(10*time.Second))
+		os.WriteFile(fout, d, 0o644)
+		t.Fatal("wrote out file - nothing to test")
+	}
+	dump.Compare(t, expectedXdsDump)
 	t.Logf("%s finished", t.Name())
 }
 
@@ -497,8 +522,8 @@ func logKrtState(t *testing.T, msg string, kdbg *krt.DebugHandler) {
 
 type xdsDumper struct {
 	conn      *grpc.ClientConn
-	adsClient envoy_service_discovery_v3.AggregatedDiscoveryService_StreamAggregatedResourcesClient
-	dr        *envoy_service_discovery_v3.DiscoveryRequest
+	adsClient discovery_v3.AggregatedDiscoveryService_StreamAggregatedResourcesClient
+	dr        *discovery_v3.DiscoveryRequest
 	cancel    context.CancelFunc
 }
 
@@ -525,19 +550,15 @@ func newXdsDumper(t *testing.T, ctx context.Context, xdsPort int, gwname string)
 
 	d := xdsDumper{
 		conn: conn,
-		dr: &envoy_service_discovery_v3.DiscoveryRequest{
-			Node: &envoycorev3.Node{
-				Id: "gateway.gwtest",
-				Metadata: &structpb.Struct{
-					Fields: map[string]*structpb.Value{
-						"role": structpb.NewStringValue(fmt.Sprintf("kgateway-kube-gateway-api~%s~%s", "gwtest", gwname)),
-					},
-				},
+		dr: &discovery_v3.DiscoveryRequest{Node: &envoycore.Node{
+			Id: "gateway.gwtest",
+			Metadata: &structpb.Struct{
+				Fields: map[string]*structpb.Value{"role": {Kind: &structpb.Value_StringValue{StringValue: fmt.Sprintf("kgateway-kube-gateway-api~%s~%s", "gwtest", gwname)}}},
 			},
-		},
+		}},
 	}
 
-	ads := envoy_service_discovery_v3.NewAggregatedDiscoveryServiceClient(d.conn)
+	ads := discovery_v3.NewAggregatedDiscoveryServiceClient(d.conn)
 	ctx, cancel := context.WithTimeout(ctx, time.Second*30) // long timeout - just in case. we should never reach it.
 	adsClient, err := ads.StreamAggregatedResources(ctx)
 	if err != nil {
@@ -549,17 +570,16 @@ func newXdsDumper(t *testing.T, ctx context.Context, xdsPort int, gwname string)
 	return d
 }
 
-func (x xdsDumper) Dump(t *testing.T, ctx context.Context) (xdsDump, error) {
-	dr := proto.Clone(x.dr).(*envoy_service_discovery_v3.DiscoveryRequest)
+func (x xdsDumper) Dump(t *testing.T, ctx context.Context) xdsDump {
+	dr := proto.Clone(x.dr).(*discovery_v3.DiscoveryRequest)
 	dr.TypeUrl = "type.googleapis.com/envoy.config.cluster.v3.Cluster"
 	x.adsClient.Send(dr)
-	dr = proto.Clone(x.dr).(*envoy_service_discovery_v3.DiscoveryRequest)
+	dr = proto.Clone(x.dr).(*discovery_v3.DiscoveryRequest)
 	dr.TypeUrl = "type.googleapis.com/envoy.config.listener.v3.Listener"
 	x.adsClient.Send(dr)
 
-	var clusters []*envoyclusterv3.Cluster
-	var listeners []*envoylistenerv3.Listener
-	var errs error
+	var clusters []*envoycluster.Cluster
+	var listeners []*envoylistener.Listener
 
 	// run this in parallel with a 5s timeout
 	done := make(chan struct{})
@@ -569,23 +589,23 @@ func (x xdsDumper) Dump(t *testing.T, ctx context.Context) (xdsDump, error) {
 		for i := 0; i < sent; i++ {
 			dresp, err := x.adsClient.Recv()
 			if err != nil {
-				errs = errors.Join(errs, fmt.Errorf("failed to get response from xds server: %v", err))
+				t.Errorf("failed to get response from xds server: %v", err)
 			}
 			t.Logf("got response: %s len: %d", dresp.GetTypeUrl(), len(dresp.GetResources()))
 			if dresp.GetTypeUrl() == "type.googleapis.com/envoy.config.cluster.v3.Cluster" {
 				for _, anyCluster := range dresp.GetResources() {
-					var cluster envoyclusterv3.Cluster
+					var cluster envoycluster.Cluster
 					if err := anyCluster.UnmarshalTo(&cluster); err != nil {
-						errs = errors.Join(errs, fmt.Errorf("failed to unmarshal cluster: %v", err))
+						t.Errorf("failed to unmarshal cluster: %v", err)
 					}
 					clusters = append(clusters, &cluster)
 				}
 			} else if dresp.GetTypeUrl() == "type.googleapis.com/envoy.config.listener.v3.Listener" {
 				needMoreListerners := false
 				for _, anyListener := range dresp.GetResources() {
-					var listener envoylistenerv3.Listener
+					var listener envoylistener.Listener
 					if err := anyListener.UnmarshalTo(&listener); err != nil {
-						errs = errors.Join(errs, fmt.Errorf("failed to unmarshal listener: %v", err))
+						t.Errorf("failed to unmarshal listener: %v", err)
 					}
 					listeners = append(listeners, &listener)
 					needMoreListerners = needMoreListerners || (len(getroutesnames(&listener)) == 0)
@@ -599,7 +619,7 @@ func (x xdsDumper) Dump(t *testing.T, ctx context.Context) (xdsDump, error) {
 					// the control plane processes the listeners
 					sent += 1
 					listeners = nil
-					dr = proto.Clone(x.dr).(*envoy_service_discovery_v3.DiscoveryRequest)
+					dr = proto.Clone(x.dr).(*discovery_v3.DiscoveryRequest)
 					dr.TypeUrl = "type.googleapis.com/envoy.config.listener.v3.Listener"
 					dr.VersionInfo = dresp.GetVersionInfo()
 					dr.ResponseNonce = dresp.GetNonce()
@@ -612,16 +632,16 @@ func (x xdsDumper) Dump(t *testing.T, ctx context.Context) (xdsDump, error) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		// don't fatal yet as we want to dump the state while still connected
-		errs = errors.Join(errs, fmt.Errorf("timed out waiting for listener/cluster xds dump"))
-		return xdsDump{}, errs
+		t.Error("timed out waiting for listener/cluster xds dump")
+		return xdsDump{}
 	}
 	if len(listeners) == 0 {
-		errs = errors.Join(errs, fmt.Errorf("no listeners found"))
-		return xdsDump{}, errs
+		t.Error("no listeners found")
+		return xdsDump{}
 	}
 	t.Logf("xds: found %d listeners and %d clusters", len(listeners), len(clusters))
 
-	clusterServiceNames := istioslices.MapFilter(clusters, func(c *envoyclusterv3.Cluster) *string {
+	clusterServiceNames := istioslices.MapFilter(clusters, func(c *envoycluster.Cluster) *string {
 		if c.GetEdsClusterConfig() != nil {
 			if c.GetEdsClusterConfig().GetServiceName() != "" {
 				s := c.GetEdsClusterConfig().GetServiceName()
@@ -640,17 +660,17 @@ func (x xdsDumper) Dump(t *testing.T, ctx context.Context) (xdsDump, error) {
 		routenames = append(routenames, getroutesnames(l)...)
 	}
 
-	dr = proto.Clone(x.dr).(*envoy_service_discovery_v3.DiscoveryRequest)
+	dr = proto.Clone(x.dr).(*discovery_v3.DiscoveryRequest)
 	dr.ResourceNames = routenames
 	dr.TypeUrl = "type.googleapis.com/envoy.config.route.v3.RouteConfiguration"
 	x.adsClient.Send(dr)
-	dr = proto.Clone(x.dr).(*envoy_service_discovery_v3.DiscoveryRequest)
+	dr = proto.Clone(x.dr).(*discovery_v3.DiscoveryRequest)
 	dr.TypeUrl = "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment"
 	dr.ResourceNames = clusterServiceNames
 	x.adsClient.Send(dr)
 
-	var endpoints []*envoyendpointv3.ClusterLoadAssignment
-	var routes []*envoyroutev3.RouteConfiguration
+	var endpoints []*envoyendpoint.ClusterLoadAssignment
+	var routes []*envoy_config_route_v3.RouteConfiguration
 
 	done = make(chan struct{})
 	go func() {
@@ -658,22 +678,22 @@ func (x xdsDumper) Dump(t *testing.T, ctx context.Context) (xdsDump, error) {
 		for i := 0; i < 2; i++ {
 			dresp, err := x.adsClient.Recv()
 			if err != nil {
-				errs = errors.Join(errs, fmt.Errorf("failed to get response from xds server: %v", err))
+				t.Errorf("failed to get response from xds server: %v", err)
 			}
 			t.Logf("got response: %s len: %d", dresp.GetTypeUrl(), len(dresp.GetResources()))
 			if dresp.GetTypeUrl() == "type.googleapis.com/envoy.config.route.v3.RouteConfiguration" {
 				for _, anyRoute := range dresp.GetResources() {
-					var route envoyroutev3.RouteConfiguration
+					var route envoy_config_route_v3.RouteConfiguration
 					if err := anyRoute.UnmarshalTo(&route); err != nil {
-						errs = errors.Join(errs, fmt.Errorf("failed to unmarshal route: %v", err))
+						t.Errorf("failed to unmarshal route: %v", err)
 					}
 					routes = append(routes, &route)
 				}
 			} else if dresp.GetTypeUrl() == "type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment" {
 				for _, anyCla := range dresp.GetResources() {
-					var cla envoyendpointv3.ClusterLoadAssignment
+					var cla envoyendpoint.ClusterLoadAssignment
 					if err := anyCla.UnmarshalTo(&cla); err != nil {
-						errs = errors.Join(errs, fmt.Errorf("failed to unmarshal cla: %v", err))
+						t.Errorf("failed to unmarshal cla: %v", err)
 					}
 					// remove kube endpoints, as with envtests we will get random ports, so we cant assert on them
 					if !strings.Contains(cla.ClusterName, "kubernetes") {
@@ -687,148 +707,139 @@ func (x xdsDumper) Dump(t *testing.T, ctx context.Context) (xdsDump, error) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		// don't fatal yet as we want to dump the state while still connected
-		errs = errors.Join(errs, fmt.Errorf("timed out waiting for routes/cla xds dump"))
-		return xdsDump{}, errs
+		t.Error("timed out waiting for routes/cla xds dump")
+		return xdsDump{}
 	}
 
 	t.Logf("found %d routes and %d endpoints", len(routes), len(endpoints))
-	xdsDump := xdsDump{
+	return xdsDump{
 		Clusters:  clusters,
 		Listeners: listeners,
 		Endpoints: endpoints,
 		Routes:    routes,
 	}
-	return xdsDump, errs
 }
 
 type xdsDump struct {
-	Clusters  []*envoyclusterv3.Cluster
-	Listeners []*envoylistenerv3.Listener
-	Endpoints []*envoyendpointv3.ClusterLoadAssignment
-	Routes    []*envoyroutev3.RouteConfiguration
+	Clusters  []*envoycluster.Cluster
+	Listeners []*envoylistener.Listener
+	Endpoints []*envoyendpoint.ClusterLoadAssignment
+	Routes    []*envoy_config_route_v3.RouteConfiguration
 }
 
-func (x *xdsDump) Compare(other xdsDump) error {
-	var errs error
-
+func (x *xdsDump) Compare(t *testing.T, other xdsDump) {
 	if len(x.Clusters) != len(other.Clusters) {
-		errs = errors.Join(errs, fmt.Errorf("expected %v clusters, got %v", len(other.Clusters), len(x.Clusters)))
+		t.Errorf("expected %v clusters, got %v", len(other.Clusters), len(x.Clusters))
 	}
 
 	if len(x.Listeners) != len(other.Listeners) {
-		errs = errors.Join(errs, fmt.Errorf("expected %v listeners, got %v", len(other.Listeners), len(x.Listeners)))
+		t.Errorf("expected %v listeners, got %v", len(other.Listeners), len(x.Listeners))
 	}
 	if len(x.Endpoints) != len(other.Endpoints) {
-		errs = errors.Join(errs, fmt.Errorf("expected %v endpoints, got %v", len(other.Endpoints), len(x.Endpoints)))
+		t.Errorf("expected %v endpoints, got %v", len(other.Endpoints), len(x.Endpoints))
 	}
 	if len(x.Routes) != len(other.Routes) {
-		errs = errors.Join(errs, fmt.Errorf("expected %v routes, got %v", len(other.Routes), len(x.Routes)))
+		t.Errorf("expected %v routes, got %v", len(other.Routes), len(x.Routes))
 	}
 
-	clusterset := map[string]*envoyclusterv3.Cluster{}
+	clusterset := map[string]*envoycluster.Cluster{}
 	for _, c := range x.Clusters {
 		clusterset[c.Name] = c
 	}
 	for _, otherc := range other.Clusters {
 		ourc := clusterset[otherc.Name]
 		if ourc == nil {
-			errs = errors.Join(errs, fmt.Errorf("cluster %v not found", otherc.Name))
+			t.Errorf("cluster %v not found", otherc.Name)
 			continue
 		}
 		ourCla := ourc.LoadAssignment
 		otherCla := otherc.LoadAssignment
-		if err := compareCla(ourCla, otherCla); err != nil {
-			errs = errors.Join(errs, fmt.Errorf("cluster %v: %w", otherc.Name, err))
-		}
+		compareCla(t, ourCla, otherCla)
 
 		// don't proto.Equal the LoadAssignment
 		ourc.LoadAssignment = nil
 		otherc.LoadAssignment = nil
 		if !proto.Equal(otherc, ourc) {
-			errs = errors.Join(errs, fmt.Errorf("cluster %v not equal: got: %s, expected: %s", otherc.Name, ourc.String(), otherc.String()))
+			t.Errorf("cluster %v not equal", otherc.Name)
+			t.Errorf("got: %s", ourc.String())
+			t.Errorf("expected: %s", otherc.String())
 		}
 		ourc.LoadAssignment = ourCla
 		otherc.LoadAssignment = otherCla
 	}
-	listenerset := map[string]*envoylistenerv3.Listener{}
+	listenerset := map[string]*envoylistener.Listener{}
 	for _, c := range x.Listeners {
 		listenerset[c.Name] = c
 	}
 	for _, c := range other.Listeners {
 		otherc := listenerset[c.Name]
 		if otherc == nil {
-			errs = errors.Join(errs, fmt.Errorf("listener %v not found", c.Name))
+			t.Errorf("listener %v not found", c.Name)
 			continue
 		}
 		if !proto.Equal(c, otherc) {
-			errs = errors.Join(errs, fmt.Errorf("listener %v not equal", c.Name))
+			t.Errorf("listener %v not equal", c.Name)
 		}
 	}
-	routeset := map[string]*envoyroutev3.RouteConfiguration{}
+	routeset := map[string]*envoy_config_route_v3.RouteConfiguration{}
 	for _, c := range x.Routes {
 		routeset[c.Name] = c
 	}
 	for _, c := range other.Routes {
 		otherc := routeset[c.Name]
 		if otherc == nil {
-			errs = errors.Join(errs, fmt.Errorf("route %v not found", c.Name))
+			t.Errorf("route %v not found", c.Name)
 			continue
 		}
 
 		// Ignore VirtualHost ordering
-		vhostFn := func(x, y *envoyroutev3.VirtualHost) bool { return x.Name < y.Name }
-		if diff := cmp.Diff(c, otherc, protocmp.Transform(), protocmp.SortRepeated(vhostFn)); diff != "" {
-			errs = errors.Join(errs, fmt.Errorf("route %v not equal!\ndiff:\b%s\n", c.Name, diff))
+		vhostFn := func(x, y *envoy_config_route_v3.VirtualHost) bool { return x.Name < y.Name }
+		if diff := cmp.Diff(c, otherc, protocmp.Transform(),
+			protocmp.SortRepeated(vhostFn)); diff != "" {
+			t.Errorf("route %v not equal!\ndiff:\b%s\n", c.Name, diff)
 		}
 	}
 
-	epset := map[string]*envoyendpointv3.ClusterLoadAssignment{}
+	epset := map[string]*envoyendpoint.ClusterLoadAssignment{}
 	for _, c := range x.Endpoints {
 		epset[c.ClusterName] = c
 	}
 	for _, c := range other.Endpoints {
 		otherc := epset[c.ClusterName]
-		if err := compareCla(c, otherc); err != nil {
-			errs = errors.Join(errs, fmt.Errorf("endpoint %v: %w", c.ClusterName, err))
-		}
+		compareCla(t, c, otherc)
 	}
-
-	return errs
 }
 
-func compareCla(c, otherc *envoyendpointv3.ClusterLoadAssignment) error {
+func compareCla(t *testing.T, c, otherc *envoyendpoint.ClusterLoadAssignment) {
 	if (c == nil) != (otherc == nil) {
-		if c == nil {
-			return fmt.Errorf("cluster is nil")
-		}
-		return fmt.Errorf("ep %v not found", c.ClusterName)
+		t.Errorf("ep %v not found", c.ClusterName)
+		return
 	}
 	if c == nil || otherc == nil {
-		return nil
+		return
 	}
 	ep1 := flattenendpoints(c)
 	ep2 := flattenendpoints(otherc)
 	if !equalset(ep1, ep2) {
-		return fmt.Errorf("ep list %v not equal: %v %v", c.ClusterName, ep1, ep2)
+		t.Errorf("ep list %v not equal: %v %v", c.ClusterName, ep1, ep2)
 	}
 	ce := c.Endpoints
 	ocd := otherc.Endpoints
 	c.Endpoints = nil
 	otherc.Endpoints = nil
 	if !proto.Equal(c, otherc) {
-		return fmt.Errorf("ep %v not equal", c.ClusterName)
+		t.Errorf("ep %v not equal", c.ClusterName)
 	}
 	c.Endpoints = ce
 	otherc.Endpoints = ocd
-	return nil
 }
 
-func equalset(a, b []*envoyendpointv3.LocalityLbEndpoints) bool {
+func equalset(a, b []*envoyendpoint.LocalityLbEndpoints) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for _, v := range a {
-		if istioslices.FindFunc(b, func(e *envoyendpointv3.LocalityLbEndpoints) bool {
+		if istioslices.FindFunc(b, func(e *envoyendpoint.LocalityLbEndpoints) bool {
 			return proto.Equal(v, e)
 		}) == nil {
 			return false
@@ -837,12 +848,12 @@ func equalset(a, b []*envoyendpointv3.LocalityLbEndpoints) bool {
 	return true
 }
 
-func flattenendpoints(v *envoyendpointv3.ClusterLoadAssignment) []*envoyendpointv3.LocalityLbEndpoints {
-	var flat []*envoyendpointv3.LocalityLbEndpoints
+func flattenendpoints(v *envoyendpoint.ClusterLoadAssignment) []*envoyendpoint.LocalityLbEndpoints {
+	var flat []*envoyendpoint.LocalityLbEndpoints
 	for _, e := range v.Endpoints {
 		for _, l := range e.LbEndpoints {
-			flatbase := proto.Clone(e).(*envoyendpointv3.LocalityLbEndpoints)
-			flatbase.LbEndpoints = []*envoyendpointv3.LbEndpoint{l}
+			flatbase := proto.Clone(e).(*envoyendpoint.LocalityLbEndpoints)
+			flatbase.LbEndpoints = []*envoyendpoint.LbEndpoint{l}
 			flat = append(flat, flatbase)
 		}
 	}
@@ -861,28 +872,28 @@ func (x *xdsDump) FromYaml(ya []byte) error {
 		return err
 	}
 	for _, c := range jsonM["clusters"] {
-		r, err := anyJsonRoundTrip[envoyclusterv3.Cluster](c)
+		r, err := anyJsonRoundTrip[envoycluster.Cluster](c)
 		if err != nil {
 			return err
 		}
 		x.Clusters = append(x.Clusters, r)
 	}
 	for _, c := range jsonM["endpoints"] {
-		r, err := anyJsonRoundTrip[envoyendpointv3.ClusterLoadAssignment](c)
+		r, err := anyJsonRoundTrip[envoyendpoint.ClusterLoadAssignment](c)
 		if err != nil {
 			return err
 		}
 		x.Endpoints = append(x.Endpoints, r)
 	}
 	for _, c := range jsonM["listeners"] {
-		r, err := anyJsonRoundTrip[envoylistenerv3.Listener](c)
+		r, err := anyJsonRoundTrip[envoylistener.Listener](c)
 		if err != nil {
 			return err
 		}
 		x.Listeners = append(x.Listeners, r)
 	}
 	for _, c := range jsonM["routes"] {
-		r, err := anyJsonRoundTrip[envoyroutev3.RouteConfiguration](c)
+		r, err := anyJsonRoundTrip[envoy_config_route_v3.RouteConfiguration](c)
 		if err != nil {
 			return err
 		}
@@ -973,7 +984,7 @@ func protoJsonRoundTrip(c proto.Message) (any, error) {
 	return roundtrip, nil
 }
 
-func getroutesnames(l *envoylistenerv3.Listener) []string {
+func getroutesnames(l *envoylistener.Listener) []string {
 	var routes []string
 	for _, fc := range l.GetFilterChains() {
 		for _, filter := range fc.GetFilters() {
@@ -981,7 +992,7 @@ func getroutesnames(l *envoylistenerv3.Listener) []string {
 			if strings.HasSuffix(filter.GetTypedConfig().GetTypeUrl(), suffix) {
 				var hcm envoyhttp.HttpConnectionManager
 				switch config := filter.GetConfigType().(type) {
-				case *envoylistenerv3.Filter_TypedConfig:
+				case *envoylistener.Filter_TypedConfig:
 					if err := config.TypedConfig.UnmarshalTo(&hcm); err == nil {
 						rds := hcm.GetRds().GetRouteConfigName()
 						if rds != "" {
@@ -993,4 +1004,97 @@ func getroutesnames(l *envoylistenerv3.Listener) []string {
 		}
 	}
 	return routes
+}
+
+func generateKubeConfiguration(t *testing.T, restconfig *rest.Config) string {
+	clusters := make(map[string]*clientcmdapi.Cluster)
+	authinfos := make(map[string]*clientcmdapi.AuthInfo)
+	contexts := make(map[string]*clientcmdapi.Context)
+
+	clusterName := "cluster"
+	clusters[clusterName] = &clientcmdapi.Cluster{
+		Server:                   restconfig.Host,
+		CertificateAuthorityData: restconfig.CAData,
+	}
+	authinfos[clusterName] = &clientcmdapi.AuthInfo{
+		ClientKeyData:         restconfig.KeyData,
+		ClientCertificateData: restconfig.CertData,
+	}
+	contexts[clusterName] = &clientcmdapi.Context{
+		Cluster:   clusterName,
+		Namespace: "default",
+		AuthInfo:  clusterName,
+	}
+
+	clientConfig := clientcmdapi.Config{
+		Kind:       "Config",
+		APIVersion: "v1",
+		Clusters:   clusters,
+		Contexts:   contexts,
+		// current context must be mgmt cluster for now, as the api server doesn't have context configurable.
+		CurrentContext: "cluster",
+		AuthInfos:      authinfos,
+	}
+	// create temp file
+	tmpfile := filepath.Join(t.TempDir(), "kubeconfig")
+	err := clientcmd.WriteToFile(clientConfig, tmpfile)
+	if err != nil {
+		t.Fatalf("failed to write kubeconfig: %v", err)
+	}
+
+	return tmpfile
+}
+
+// applyPodStatusFromFile reads a YAML file, looks for Pod resources with a Status set,
+// and patches their status into the cluster. Skips any Pods not found or lacking a status.
+// This is needed because the other places that apply yaml will only apply spec.
+// We now have tests (ServiceEntry) that rely on IPs from Pod status instead of EndpointSlice.
+func applyPodStatusFromFile(ctx context.Context, c istiokube.CLIClient, defaultNs, filePath string) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("reading YAML file %q: %w", filePath, err)
+	}
+
+	docs := bytes.Split(data, []byte("\n---\n"))
+
+	for _, doc := range docs {
+		doc = bytes.TrimSpace(doc)
+		if len(doc) == 0 {
+			continue
+		}
+
+		pod := &corev1.Pod{}
+		if err := yaml.Unmarshal(doc, pod); err != nil {
+			continue
+		}
+
+		// Skip if there's no status to patch
+		if pod.Status.PodIP == "" && len(pod.Status.PodIPs) == 0 && pod.Status.Phase == "" {
+			continue
+		}
+
+		ns := pod.Namespace
+		if ns == "" {
+			ns = defaultNs
+		}
+
+		podClient := c.Kube().CoreV1().Pods(ns)
+
+		// Retrieve the existing Pod
+		existingPod, err := podClient.Get(ctx, pod.Name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to retrieve existing Pod %s/%s: %w", ns, pod.Name, err)
+		}
+
+		// Update the in-memory status
+		existingPod.Status = pod.Status
+
+		// Persist the new status
+		_, err = podClient.UpdateStatus(ctx, existingPod, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update status for Pod %s/%s: %w", ns, pod.Name, err)
+		}
+	}
+
+	return nil
 }

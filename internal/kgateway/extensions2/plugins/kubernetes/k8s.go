@@ -2,36 +2,40 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
-	envoyclusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
-	envoycorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	"istio.io/api/annotation"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"knative.dev/pkg/network"
+
+	envoy_config_cluster_v3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	v32 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	envoy_tls_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	envoyauth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/utils"
+	"github.com/solo-io/go-utils/contextutils"
 	"istio.io/istio/pkg/kube/kclient"
 	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/ptr"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	"github.com/kgateway-dev/kgateway/v2/api/settings"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/common"
+	extensionsplug "github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/plugin"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/settings"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/krtcollections"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/utils/krtutil"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/wellknown"
-	sdk "github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/collections"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/ir"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/krtutil"
-	"github.com/kgateway-dev/kgateway/v2/pkg/utils/kubeutils"
 )
 
 const BackendClusterPrefix = "kube"
 
-func NewPlugin(ctx context.Context, commonCol *collections.CommonCollections) sdk.Plugin {
-	epSliceClient := kclient.NewFiltered[*discoveryv1.EndpointSlice](
-		commonCol.Client,
-		kclient.Filter{ObjectFilter: commonCol.Client.ObjectFilter()},
-	)
-	endpointSlices := krt.WrapClient(epSliceClient, commonCol.KrtOpts.ToOptions("EndpointSlices")...)
-	return NewPluginFromCollections(ctx, commonCol.KrtOpts, commonCol.LocalityPods, commonCol.Services, endpointSlices, commonCol.Settings)
+func NewPlugin(ctx context.Context, commoncol *common.CommonCollections) extensionsplug.Plugin {
+	epSliceClient := kclient.New[*discoveryv1.EndpointSlice](commoncol.Client)
+	endpointSlices := krt.WrapClient(epSliceClient, commoncol.KrtOpts.ToOptions("EndpointSlices")...)
+	return NewPluginFromCollections(ctx, commoncol.KrtOpts, commoncol.Pods, commoncol.Services, endpointSlices, commoncol.Settings)
 }
 
 func NewPluginFromCollections(
@@ -41,7 +45,7 @@ func NewPluginFromCollections(
 	services krt.Collection[*corev1.Service],
 	endpointSlices krt.Collection[*discoveryv1.EndpointSlice],
 	stngs settings.Settings,
-) sdk.Plugin {
+) extensionsplug.Plugin {
 	k8sServiceBackends := krt.NewManyCollection(services, func(kctx krt.HandlerContext, svc *corev1.Service) []ir.BackendObjectIR {
 		uss := []ir.BackendObjectIR{}
 		for _, port := range svc.Spec.Ports {
@@ -53,64 +57,98 @@ func NewPluginFromCollections(
 	inputs := krtcollections.NewGlooK8sEndpointInputs(stngs, krtOpts, endpointSlices, pods, k8sServiceBackends)
 	k8sServiceEndpoints := krtcollections.NewK8sEndpoints(ctx, inputs)
 
-	return sdk.Plugin{
-		ContributesBackends: map[schema.GroupKind]sdk.BackendPlugin{
+	return extensionsplug.Plugin{
+		ContributesBackends: map[schema.GroupKind]extensionsplug.BackendPlugin{
 			wellknown.ServiceGVK.GroupKind(): {
 				BackendInit: ir.BackendInit{
-					InitEnvoyBackend: processBackend,
+					InitBackend: processBackend,
 				},
 				Endpoints: k8sServiceEndpoints,
 				Backends:  k8sServiceBackends,
 			},
 		},
 		// TODO consider ContibutesPolicies allowing backendRef by networking.istio.io/Hostname
-		// wellknown.ServiceGCK.GroupKind(): sdk.PolicyPlugin{
+		// wellknown.ServiceGCK.GroupKind(): extensionsplug.PolicyPlugin{
 		// 	GetBackendForRef: getBackendForHostnameRef,
 		// },
 	}
 }
 
 func BuildServiceBackendObjectIR(svc *corev1.Service, svcPort int32, svcProtocol string) ir.BackendObjectIR {
-	objSrc := ir.ObjectSource{
-		Kind:      wellknown.ServiceGVK.Kind,
-		Group:     wellknown.ServiceGVK.Group,
-		Namespace: svc.Namespace,
-		Name:      svc.Name,
+	return ir.BackendObjectIR{
+		ObjectSource: ir.ObjectSource{
+			Kind:      wellknown.ServiceGVK.Kind,
+			Group:     wellknown.ServiceGVK.Group,
+			Namespace: svc.Namespace,
+			Name:      svc.Name,
+		},
+		Obj: svc,
+		// TODO: fill in ObjIR
+		Port:        svcPort,
+		AppProtocol: ir.ParseAppProtocol(&svcProtocol),
+		GvPrefix:    BackendClusterPrefix,
+		// TODO: reevaluate knative dep, dedupe with pkg/utils/kubeutils/dns.go
+		CanonicalHostname: fmt.Sprintf("%s.%s.svc.%s", svc.Name, svc.Namespace, network.GetClusterDomainName()),
 	}
-	backend := ir.NewBackendObjectIR(objSrc, svcPort, "")
-	backend.Obj = svc
-	backend.AppProtocol = ir.ParseAppProtocol(&svcProtocol)
-	backend.GvPrefix = BackendClusterPrefix
-	backend.CanonicalHostname = kubeutils.GetServiceHostname(svc.Name, svc.Namespace)
-
-	// If the trafficDistribution is specified in the spec, use that.
-	// If both annotations and spec are specified, the spec takes precedence.
-	// The field was added as beta in Kubernetes 1.31
-	if svc.Spec.TrafficDistribution != nil {
-		backend.TrafficDistribution = wellknown.ParseTrafficDistribution(*svc.Spec.TrafficDistribution)
-	} else if val, ok := svc.Annotations[annotation.NetworkingTrafficDistribution.Name]; ok {
-		// We support specifying the Istio traffic distribution annotation in older k8s versions
-		backend.TrafficDistribution = wellknown.ParseTrafficDistribution(val)
-	}
-
-	// Parse common annotations
-	ir.ParseObjectAnnotations(&backend, svc)
-
-	return backend
 }
 
-func processBackend(ctx context.Context, in ir.BackendObjectIR, out *envoyclusterv3.Cluster) *ir.EndpointsForBackend {
-	out.ClusterDiscoveryType = &envoyclusterv3.Cluster_Type{
-		Type: envoyclusterv3.Cluster_EDS,
+func processBackend(ctx context.Context, in ir.BackendObjectIR, out *envoy_config_cluster_v3.Cluster) {
+
+	out.ClusterDiscoveryType = &envoy_config_cluster_v3.Cluster_Type{
+		Type: envoy_config_cluster_v3.Cluster_EDS,
 	}
-	out.EdsClusterConfig = &envoyclusterv3.Cluster_EdsClusterConfig{
-		EdsConfig: &envoycorev3.ConfigSource{
-			ResourceApiVersion: envoycorev3.ApiVersion_V3,
-			ConfigSourceSpecifier: &envoycorev3.ConfigSource_Ads{
-				Ads: &envoycorev3.AggregatedConfigSource{},
+	out.EdsClusterConfig = &envoy_config_cluster_v3.Cluster_EdsClusterConfig{
+		EdsConfig: &envoy_config_core_v3.ConfigSource{
+			ResourceApiVersion: envoy_config_core_v3.ApiVersion_V3,
+			ConfigSourceSpecifier: &envoy_config_core_v3.ConfigSource_Ads{
+				Ads: &envoy_config_core_v3.AggregatedConfigSource{},
 			},
 		},
 	}
-	out.IgnoreHealthOnHostRemoval = true
-	return nil
+	hostname, ok := getBackendHostFromService(ctx, in)
+	if ok && in.Port == 443 {
+		typedConfig, _ := utils.MessageToAny(&envoyauth.UpstreamTlsContext{
+			CommonTlsContext: &envoy_tls_v3.CommonTlsContext{},
+			Sni:              hostname,
+		})
+		out.TransportSocket = &v32.TransportSocket{
+			Name:       "envoy.transport_sockets.tls",
+			ConfigType: &envoy_config_core_v3.TransportSocket_TypedConfig{TypedConfig: typedConfig},
+		}
+	}
+}
+
+func getBackendHostFromService(ctx context.Context, in ir.BackendObjectIR) (string, bool) {
+	svc, ok := in.Obj.(*corev1.Service)
+	if !ok {
+		contextutils.LoggerFrom(ctx).Debug("input object is not a service")
+		return "", false
+	}
+
+	configJSON, exists := svc.Annotations["kubegien.org/serviceConfigs"]
+	if !exists {
+		contextutils.LoggerFrom(ctx).Debug("service missing required annotation")
+		return "", false
+	}
+
+	var config map[string]interface{}
+	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
+		contextutils.LoggerFrom(ctx).Debugf("svc %s/%s failed to parse service config, error: %v, rawConfig: %s",
+			svc.Namespace, svc.Name, err, configJSON)
+		return "", false
+	}
+
+	backendHost, ok := config["backendHostname"].(string)
+	if !ok {
+		contextutils.LoggerFrom(ctx).Debugf("svc %s/%s backendHostname field missing or invalid type, config: %v",
+			svc.Namespace, svc.Name, config)
+		return "", false
+	}
+
+	if backendHost == "" {
+		contextutils.LoggerFrom(ctx).Debugf("svc %s/%s backendHostname is empty", svc.Namespace, svc.Name)
+		return "", false
+	}
+
+	return backendHost, true
 }

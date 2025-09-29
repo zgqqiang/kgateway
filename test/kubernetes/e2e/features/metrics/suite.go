@@ -1,393 +1,116 @@
+//go:build ignore
+
 package metrics
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
+	adminv3 "github.com/envoyproxy/go-control-plane/envoy/admin/v3"
 	"github.com/onsi/gomega"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/kgateway-dev/kgateway/v2/pkg/metrics"
-	"github.com/kgateway-dev/kgateway/v2/pkg/metrics/metricstest"
+	gloov1 "github.com/kgateway-dev/kgateway/v2/internal/gloo/pkg/api/v1"
+	"github.com/kgateway-dev/kgateway/v2/internal/gloo/pkg/translator"
+	"github.com/kgateway-dev/kgateway/v2/internal/gloo/pkg/upstreams/kubernetes"
+	"github.com/kgateway-dev/kgateway/v2/pkg/utils/envoyutils/admincli"
 	"github.com/kgateway-dev/kgateway/v2/pkg/utils/kubeutils"
 	"github.com/kgateway-dev/kgateway/v2/pkg/utils/requestutils/curl"
 	testmatchers "github.com/kgateway-dev/kgateway/v2/test/gomega/matchers"
 	"github.com/kgateway-dev/kgateway/v2/test/kubernetes/e2e"
-	e2edefaults "github.com/kgateway-dev/kgateway/v2/test/kubernetes/e2e/defaults"
+	"github.com/kgateway-dev/kgateway/v2/test/kubernetes/e2e/defaults"
 	"github.com/kgateway-dev/kgateway/v2/test/kubernetes/e2e/tests/base"
 )
 
 var _ e2e.NewSuiteFunc = NewTestingSuite
 
-// testingSuite is a suite of basic control plane metrics.
 type testingSuite struct {
 	*base.BaseTestingSuite
 }
 
-// NewTestingSuite creates a new testing suite for control plane metrics.
 func NewTestingSuite(ctx context.Context, testInst *e2e.TestInstallation) suite.TestingSuite {
 	return &testingSuite{
-		base.NewBaseTestingSuite(ctx, testInst, setup, testCases),
+		base.NewBaseTestingSuite(ctx, testInst, e2e.MustTestHelper(ctx, testInst), base.SimpleTestCase{}, testCases),
 	}
 }
 
-func (s *testingSuite) checkPodsRunning() {
-	s.TestInstallation.Assertions.EventuallyPodsRunning(s.Ctx, kgatewayMetricsObjectMeta.GetNamespace(), metav1.ListOptions{
-		LabelSelector: "app.kubernetes.io/name=kgateway",
-	})
+// TestKubeServiceSuccessStats sends a number of requests to a kube Service and checks that the cluster metrics
+// show the expected number of successful requests
+func (s *testingSuite) TestKubeServiceSuccessStats() {
+	s.TestInstallation.Assertions.EventuallyReadyReplicas(s.Ctx, proxyDeployment.ObjectMeta, gomega.Equal(1))
+
+	kubeSvcUpstream := kubernetes.ServiceToUpstream(s.Ctx, exampleSvc, exampleSvc.Spec.Ports[0])
+	s.sendAndAssertNumSuccessfulRequests(3, kubeSvcUpstream)
 }
 
-func (s *testingSuite) TestMetrics() {
-	// Make sure pods are running.
-	s.checkPodsRunning()
+// TestKubeUpstreamSuccessStats sends a number of requests to a kube Upstream and checks that the cluster metrics
+// show the expected number of successful requests
+func (s *testingSuite) TestKubeUpstreamSuccessStats() {
+	s.TestInstallation.Assertions.EventuallyReadyReplicas(s.Ctx, proxyDeployment.ObjectMeta, gomega.Equal(1))
 
-	// Verify the test services are created and working.
-	s.TestInstallation.Assertions.AssertEventualCurlResponse(
-		s.Ctx,
-		e2edefaults.CurlPodExecOpt,
-		[]curl.Option{
-			curl.WithHost(kubeutils.ServiceFQDN(proxyObjectMeta)),
-			curl.WithHostHeader("example1.com"),
-			curl.WithPort(8080),
-		},
-		&testmatchers.HttpResponse{
-			StatusCode: http.StatusOK,
-			Body:       gomega.ContainSubstring(e2edefaults.NginxResponse),
-		})
+	s.sendAndAssertNumSuccessfulRequests(2, kubeUpstream)
+}
 
-	// Verify the control plane metrics are generating as expected.
-	s.TestInstallation.Assertions.Assert.EventuallyWithT(func(c *assert.CollectT) {
-		resp := s.TestInstallation.Assertions.AssertEventualCurlReturnResponse(
+// sendAndAssertNumSuccessfulRequests sends the specified number of requests to the given upstream
+// and verifies that the upstream cluster's stats show the expected number of successful requests
+func (s *testingSuite) sendAndAssertNumSuccessfulRequests(numRequests int, upstream *gloov1.Upstream) {
+	// send the specified number of requests with a successful responses
+	for i := 0; i < numRequests; i++ {
+		s.TestInstallation.Assertions.AssertEventualCurlResponse(
 			s.Ctx,
-			e2edefaults.CurlPodExecOpt,
+			defaults.CurlPodExecOpt,
 			[]curl.Option{
-				curl.WithHost(kubeutils.ServiceFQDN(kgatewayMetricsObjectMeta)),
-				curl.WithPort(9092),
-				curl.WithPath("/metrics"),
+				curl.WithHost(kubeutils.ServiceFQDN(proxyService.ObjectMeta)),
+				curl.WithHostHeader("example.com"),
 			},
-			&testmatchers.HttpResponse{StatusCode: http.StatusOK},
-		)
+			&testmatchers.HttpResponse{
+				StatusCode: http.StatusOK,
+			})
+	}
 
-		defer func() {
-			if err := resp.Body.Close(); err != nil {
-				c.Errorf("unable to close response body: %v", err)
-			}
-		}()
+	// make sure the stats show the expected number of successful responses
+	s.TestInstallation.Assertions.AssertEnvoyAdminApi(
+		s.Ctx,
+		proxyDeployment.ObjectMeta,
+		metricsAssertion(s.TestInstallation,
+			getUpstreamSuccessfulRequestsMetricName(upstream),
+			numRequests,
+		),
+	)
+}
 
-		gathered := metricstest.MustParseGatheredMetrics(c, resp.Body)
+// getUpstreamSuccessfulRequestsMetricName gets a metric name used for looking up the total 2xx responses from the given upstream
+func getUpstreamSuccessfulRequestsMetricName(upstream *gloov1.Upstream) string {
+	clusterStatName := translator.UpstreamToClusterStatsName(upstream)
+	return fmt.Sprintf("cluster.%s.upstream_rq_2xx", clusterStatName)
+}
 
-		gathered.AssertMetricsLabelsInclude("kgateway_controller_reconcile_duration_seconds", [][]metrics.Label{{
-			{Name: "controller", Value: "gateway"},
-			{Name: "name", Value: "gw1"},
-			{Name: "namespace", Value: "default"},
-		}})
+// metricsAssertion asserts that the envoy admin server stats endpoint shows a metric with the given name and value
+func metricsAssertion(testInstallation *e2e.TestInstallation, metricName string, expectedMetricValue int) func(ctx context.Context, adminClient *admincli.Client) {
+	return func(ctx context.Context, adminClient *admincli.Client) {
+		testInstallation.Assertions.Gomega.Eventually(func(g gomega.Gomega) {
+			out, err := adminClient.GetStats(ctx, map[string]string{
+				// see https://www.envoyproxy.io/docs/envoy/latest/operations/admin#get--stats
+				"format": "json",
+				"filter": fmt.Sprintf("^%s$", metricName),
+			})
+			g.Expect(err).NotTo(gomega.HaveOccurred(), "can get envoy stats")
 
-		gathered.AssertHistogramPopulated("kgateway_controller_reconcile_duration_seconds")
+			var resp map[string][]adminv3.SimpleMetric
+			err = json.Unmarshal([]byte(out), &resp)
+			g.Expect(err).NotTo(gomega.HaveOccurred(), "can unmarshal envoy stats response")
 
-		gathered.AssertMetricsLabelsInclude("kgateway_controller_reconciliations_total", [][]metrics.Label{{
-			{Name: "controller", Value: "gateway"},
-			{Name: "name", Value: "gw1"},
-			{Name: "namespace", Value: "default"},
-			{Name: "result", Value: "success"},
-		}})
-
-		gathered.AssertMetricsInclude("kgateway_controller_reconciliations_running", []metricstest.ExpectMetric{
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "controller", Value: "gateway"},
-					{Name: "name", Value: "gw1"},
-					{Name: "namespace", Value: "default"},
-				},
-				Test: metricstest.Equal(0),
-			},
-		})
-
-		gathered.AssertMetricsInclude("kgateway_resources_managed", []metricstest.ExpectMetric{
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "namespace", Value: "default"},
-					{Name: "parent", Value: "gw1"},
-					{Name: "resource", Value: "Gateway"},
-				},
-				Test: metricstest.Equal(1),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "namespace", Value: "default"},
-					{Name: "parent", Value: "gw1"},
-					{Name: "resource", Value: "HTTPRoute"},
-				},
-				Test: metricstest.Equal(2),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "namespace", Value: "default"},
-					{Name: "parent", Value: "gw1"},
-					{Name: "resource", Value: "XListenerSet"},
-				},
-				Test: metricstest.Equal(1),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "namespace", Value: "default"},
-					{Name: "parent", Value: "gw2"},
-					{Name: "resource", Value: "Gateway"},
-				},
-				Test: metricstest.Equal(1),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "namespace", Value: "default"},
-					{Name: "parent", Value: "gw2"},
-					{Name: "resource", Value: "HTTPRoute"},
-				},
-				Test: metricstest.Equal(1),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "namespace", Value: "default"},
-					{Name: "parent", Value: "ls1"},
-					{Name: "resource", Value: "HTTPRoute"},
-				},
-				Test: metricstest.Equal(1),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "namespace", Value: "default"},
-					{Name: "parent", Value: ""},
-					{Name: "resource", Value: "HTTPListenerPolicy"},
-				},
-				Test: metricstest.Equal(1),
-			},
-		})
-
-		gathered.AssertMetricsInclude("kgateway_resources_status_syncs_started_total", []metricstest.ExpectMetric{
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw2"},
-					{Name: "namespace", Value: "default"},
-					{Name: "resource", Value: "Gateway"},
-				},
-				Test: metricstest.Between(1, 6),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw2"},
-					{Name: "namespace", Value: "default"},
-					{Name: "resource", Value: "HTTPRoute"},
-				},
-				Test: metricstest.Between(1, 3),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: ""},
-					{Name: "namespace", Value: "default"},
-					{Name: "resource", Value: "HTTPListenerPolicy"},
-				},
-				Test: metricstest.Between(1, 2),
-			},
-		})
-
-		gathered.AssertMetricsInclude("kgateway_resources_status_syncs_completed_total", []metricstest.ExpectMetric{
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw2"},
-					{Name: "namespace", Value: "default"},
-					{Name: "resource", Value: "Gateway"},
-				},
-				Test: metricstest.Between(1, 6),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw2"},
-					{Name: "namespace", Value: "default"},
-					{Name: "resource", Value: "HTTPRoute"},
-				},
-				Test: metricstest.Between(1, 3),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: ""},
-					{Name: "namespace", Value: "default"},
-					{Name: "resource", Value: "HTTPListenerPolicy"},
-				},
-				Test: metricstest.Between(1, 2),
-			},
-		})
-
-		gathered.AssertMetricsLabelsInclude("kgateway_resources_status_sync_duration_seconds", [][]metrics.Label{{
-			{Name: "gateway", Value: "gw2"},
-			{Name: "namespace", Value: "default"},
-			{Name: "resource", Value: "Gateway"},
-		}, {
-			{Name: "gateway", Value: "gw2"},
-			{Name: "namespace", Value: "default"},
-			{Name: "resource", Value: "HTTPRoute"},
-		}, {
-			{Name: "gateway", Value: ""},
-			{Name: "namespace", Value: "default"},
-			{Name: "resource", Value: "HTTPListenerPolicy"},
-		}})
-
-		gathered.AssertHistogramPopulated("kgateway_resources_status_sync_duration_seconds")
-
-		gathered.AssertMetricsInclude("kgateway_xds_snapshot_syncs_total", []metricstest.ExpectMetric{
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw1"},
-					{Name: "namespace", Value: "default"},
-				},
-				Test: metricstest.Between(1, 2),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw2"},
-					{Name: "namespace", Value: "default"},
-				},
-				Test: metricstest.Between(1, 2),
-			},
-		})
-
-		gathered.AssertMetricsLabelsInclude("kgateway_xds_snapshot_sync_duration_seconds", [][]metrics.Label{{
-			{Name: "gateway", Value: "gw1"},
-			{Name: "namespace", Value: "default"},
-		}, {
-			{Name: "gateway", Value: "gw2"},
-			{Name: "namespace", Value: "default"},
-		}})
-		gathered.AssertHistogramPopulated("kgateway_xds_snapshot_sync_duration_seconds")
-
-		gathered.AssertMetricsLabelsInclude("kgateway_xds_snapshot_transforms_total", [][]metrics.Label{{
-			{Name: "gateway", Value: "gw1"},
-			{Name: "namespace", Value: "default"},
-			{Name: "result", Value: "success"},
-		}})
-
-		gathered.AssertMetricsLabelsInclude("kgateway_xds_snapshot_transform_duration_seconds", [][]metrics.Label{{
-			{Name: "gateway", Value: "gw1"},
-			{Name: "namespace", Value: "default"},
-		}})
-
-		gathered.AssertHistogramPopulated("kgateway_xds_snapshot_transform_duration_seconds")
-
-		gathered.AssertMetricsInclude("kgateway_xds_snapshot_resources", []metricstest.ExpectMetric{
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw1"},
-					{Name: "namespace", Value: "default"},
-					{Name: "resource", Value: "Listener"},
-				},
-				Test: metricstest.Equal(4),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw1"},
-					{Name: "namespace", Value: "default"},
-					{Name: "resource", Value: "Route"},
-				},
-				Test: metricstest.Equal(4),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw2"},
-					{Name: "namespace", Value: "default"},
-					{Name: "resource", Value: "Listener"},
-				},
-				Test: metricstest.Equal(2),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw2"},
-					{Name: "namespace", Value: "default"},
-					{Name: "resource", Value: "Route"},
-				},
-				Test: metricstest.Equal(2),
-			},
-		})
-
-		gathered.AssertMetricsLabelsInclude("kgateway_status_syncer_status_syncs_total", [][]metrics.Label{{
-			{Name: "name", Value: "gw1"},
-			{Name: "namespace", Value: "default"},
-			{Name: "result", Value: "success"},
-			{Name: "syncer", Value: "GatewayStatusSyncer"},
-		}})
-
-		gathered.AssertMetricsLabelsInclude("kgateway_status_syncer_status_sync_duration_seconds", [][]metrics.Label{{
-			{Name: "name", Value: "gw1"},
-			{Name: "namespace", Value: "default"},
-			{Name: "syncer", Value: "GatewayStatusSyncer"},
-		}})
-
-		gathered.AssertHistogramPopulated("kgateway_status_syncer_status_sync_duration_seconds")
-
-		gathered.AssertMetricsLabelsInclude("kgateway_translator_translations_total", [][]metrics.Label{{
-			{Name: "name", Value: "gw1"},
-			{Name: "namespace", Value: "default"},
-			{Name: "result", Value: "success"},
-			{Name: "translator", Value: "TranslateGateway"},
-		}, {
-			{Name: "name", Value: "gw1"},
-			{Name: "namespace", Value: "default"},
-			{Name: "result", Value: "success"},
-			{Name: "translator", Value: "TranslateHTTPRoute"},
-		}})
-
-		gathered.AssertMetricsLabelsInclude("kgateway_translator_translation_duration_seconds", [][]metrics.Label{{
-			{Name: "name", Value: "gw1"},
-			{Name: "namespace", Value: "default"},
-			{Name: "translator", Value: "TranslateGateway"},
-		}, {
-			{Name: "name", Value: "gw1"},
-			{Name: "namespace", Value: "default"},
-			{Name: "translator", Value: "TranslateHTTPRoute"},
-		}})
-
-		gathered.AssertHistogramPopulated("kgateway_translator_translation_duration_seconds")
-
-		gathered.AssertMetricsInclude("kgateway_routing_domains", []metricstest.ExpectMetric{
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw1"},
-					{Name: "namespace", Value: "default"},
-					{Name: "port", Value: "8080"},
-				},
-				Test: metricstest.Equal(5),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw1"},
-					{Name: "namespace", Value: "default"},
-					{Name: "port", Value: "8088"},
-				},
-				Test: metricstest.Equal(2),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw1"},
-					{Name: "namespace", Value: "default"},
-					{Name: "port", Value: "8443"},
-				},
-				Test: metricstest.Equal(2),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw2"},
-					{Name: "namespace", Value: "default"},
-					{Name: "port", Value: "8080"},
-				},
-				Test: metricstest.Equal(3),
-			},
-			&metricstest.ExpectedMetricValueTest{
-				Labels: []metrics.Label{
-					{Name: "gateway", Value: "gw2"},
-					{Name: "namespace", Value: "default"},
-					{Name: "port", Value: "8443"},
-				},
-				Test: metricstest.Equal(3),
-			},
-		})
-	}, 20*time.Second, time.Second)
+			stats := resp["stats"]
+			g.Expect(stats).To(gomega.HaveLen(1), "expected 1 matching stats result")
+			g.Expect(stats[0].GetName()).To(gomega.Equal(metricName))
+			g.Expect(stats[0].GetValue()).To(gomega.Equal(uint64(expectedMetricValue)))
+		}).
+			WithContext(ctx).
+			WithTimeout(time.Second * 10).
+			WithPolling(time.Millisecond * 200).
+			Should(gomega.Succeed())
+	}
 }

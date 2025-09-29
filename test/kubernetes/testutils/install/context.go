@@ -1,6 +1,8 @@
 package install
 
-import "fmt"
+import (
+	"github.com/rotisserie/eris"
+)
 
 // Context contains the set of properties for a given installation of kgateway
 type Context struct {
@@ -14,9 +16,6 @@ type Context struct {
 
 	// ValuesManifestFile points to the file that contains the set of Helm values that are unique to this test
 	ValuesManifestFile string
-
-	// ExtraHelmArgs are additional Helm arguments
-	ExtraHelmArgs []string
 }
 
 // ValidateInstallContext returns an error if the provided Context is invalid
@@ -26,18 +25,18 @@ func ValidateInstallContext(context *Context) error {
 
 func validateValuesManifest(name string, file string) error {
 	if file == "" {
-		return fmt.Errorf("%s must be provided in install.Context", name)
+		return eris.Errorf("%s must be provided in install.Context", name)
 	}
 
 	/*
 		// TODO consider adding back helm value validation https://github.com/kgateway-dev/kgateway/issues/10483#issuecomment-2651621134
 		values, err := testutils.BuildHelmValues(testutils.HelmValues{ValuesFile: file})
 		if err != nil {
-			return fmt.Errorf("failed to build helm values for %s: %w", name, err)
+			return eris.Wrapf(err, "failed to build helm values for %s", name)
 		}
 		err = testutils.ValidateHelmValues(values)
 		if err != nil {
-			return fmt.Errorf("failed to validate helm values for %s: %w", name, err)
+			return eris.Wrapf(err, "failed to validate helm values for %s", name)
 		}
 	*/
 	return nil

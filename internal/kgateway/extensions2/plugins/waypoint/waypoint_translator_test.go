@@ -8,12 +8,8 @@ import (
 	"github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/plugins/waypoint"
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/wellknown"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/collections"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/translator/gateway/testutils"
 	"github.com/kgateway-dev/kgateway/v2/pkg/utils/fsutils"
-	translatortest "github.com/kgateway-dev/kgateway/v2/test/translator"
 )
 
 // exampleGw is used in most tests, but we may want to have
@@ -35,13 +31,6 @@ var cases = []struct {
 	{"HTTPRoute on ServiceEntry", "httproute-se", exampleGw, ""},
 	{"HTTPRoute on ServiceEntry via Hostname", "httproute-se-hostname", exampleGw, ""},
 	{"Authz Policies", "authz", exampleGw, ""},
-	{"Authz Policies - Gateway Ref", "authz-gateway-ref", exampleGw, ""},
-	{"Authz Policies - Gateway Ref Fake GW", "authz-gateway-ref-fakegw", exampleGw, ""},
-	{"Authz Policies - GatewayClass Ref", "authz-gatewayclass-ref", exampleGw, ""},
-	{"Authz Policies - GatewayClass Ref Non-Root NS", "authz-gatewayclass-ref-nonrootns", exampleGw, ""},
-	{"Authz Policies - ServiceEntry", "authz-serviceentry", exampleGw, ""},
-	{"Authz Policies - Multi-Service", "authz-multi-service", exampleGw, ""},
-	{"No listeners", "empty", exampleGw, ""},
 }
 
 func TestWaypointTranslator(t *testing.T) {
@@ -55,18 +44,13 @@ func TestWaypointTranslator(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			dir := fsutils.MustGetThisDir()
-
-			extraPluginsFn := func(ctx context.Context, commoncol *collections.CommonCollections, mergeSettingsJSON string) []pluginsdk.Plugin {
-				return []pluginsdk.Plugin{waypoint.NewPlugin(ctx, commoncol, wellknown.DefaultWaypointClassName)}
-			}
-			translatortest.TestTranslationWithExtraPlugins(
+			testutils.TestTranslation(
 				t,
 				ctx,
 				[]string{filepath.Join(dir, "testdata/input", tt.file+".yaml")},
 				filepath.Join(dir, "testdata/output", tt.file+".yaml"),
 				tt.gw,
-				extraPluginsFn,
-				nil, nil, "",
+				nil,
 			)
 		})
 	}

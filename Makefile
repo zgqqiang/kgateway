@@ -18,7 +18,7 @@
 help: NAME_COLUMN_WIDTH=35
 help: LINE_COLUMN_WIDTH=5
 help: ## Output the self-documenting make targets
-	@grep -hnE '^[%a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = "[:]|(## )"}; {printf "\033[36mL%-$(LINE_COLUMN_WIDTH)s%-$(NAME_COLUMN_WIDTH)s\033[0m %s\n", $$1, $$2, $$4}'
+	@grep -hnE '^[%a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = "[:]|(## )"}; {printf "\033[36mL%-$(LINE_COLUMN_WIDTH)s%-$(NAME_COLUMN_WIDTH)s\033[0m %s\n", $$1, $$2, $$4}'
 
 #----------------------------------------------------------------------------------
 # Base
@@ -27,6 +27,7 @@ help: ## Output the self-documenting make targets
 ROOTDIR := $(shell pwd)
 OUTPUT_DIR ?= $(ROOTDIR)/_output
 
+# TODO: fix this
 export IMAGE_REGISTRY ?= ghcr.io/kgateway-dev
 
 # Kind of a hack to make sure _output exists
@@ -38,8 +39,10 @@ export VERSION
 
 SOURCES := $(shell find . -name "*.go" | grep -v test.go)
 
-# Note: When bumping this version, update the version in pkg/validator/validator.go as well.
-export ENVOY_IMAGE ?= quay.io/solo-io/envoy-gloo:1.35.2-patch1
+# ATTENTION: when updating to a new major version of Envoy, check if
+# universal header validation has been enabled and if so, we expect
+# failures in `test/e2e/header_validation_test.go`.
+export ENVOY_IMAGE ?= quay.io/solo-io/envoy-gloo:1.34.0-patch0
 export LDFLAGS := -X 'github.com/kgateway-dev/kgateway/v2/internal/version.Version=$(VERSION)'
 export GCFLAGS ?=
 
@@ -73,11 +76,12 @@ endif
 GOOS ?= $(shell uname -s | tr '[:upper:]' '[:lower:]')
 
 GO_BUILD_FLAGS := GO111MODULE=on CGO_ENABLED=0 GOARCH=$(GOARCH)
+GOLANG_ALPINE_IMAGE_NAME = golang:$(shell go version | egrep -o '([0-9]+\.[0-9]+)')-alpine3.18
 
 TEST_ASSET_DIR ?= $(ROOTDIR)/_test
 
 # This is the location where assets are placed after a test failure
-# This is used by our e2e tests to emit information about the running instance of kgateway
+# This is used by our e2e tests to emit information about the running instance of Gloo Gateway
 BUG_REPORT_DIR := $(TEST_ASSET_DIR)/bug_report
 $(BUG_REPORT_DIR):
 	mkdir -p $(BUG_REPORT_DIR)
@@ -89,7 +93,22 @@ TEST_LOG_DIR := $(TEST_ASSET_DIR)/test_log
 $(TEST_LOG_DIR):
 	mkdir -p $(TEST_LOG_DIR)
 
-# Base Alpine image used for all containers. Exported for use in goreleaser.yaml.
+# Used to install ca-certificates in GLOO_DISTROLESS_BASE_IMAGE
+PACKAGE_DONOR_IMAGE ?= debian:11
+# Harvested for utility binaries (sh, wget, sleep, nc, echo, ls, cat, vi)
+# in GLOO_DISTROLESS_BASE_WITH_UTILS_IMAGE
+# We use the uclibc variant as it is statically compiled so the binaries can be copied over and run on another image without issues (unlike glibc)
+UTILS_DONOR_IMAGE ?= busybox:uclibc
+# Use a distroless debian variant that is in sync with the ubuntu version used for envoy
+# https://github.com/solo-io/envoy-gloo-ee/blob/main/ci/Dockerfile#L7 - check /etc/debian_version in the ubuntu version used
+# This is the true base image for GLOO_DISTROLESS_BASE_IMAGE and GLOO_DISTROLESS_BASE_WITH_UTILS_IMAGE
+# Since we only publish amd64 images, we use the amd64 variant. If we decide to change this, we need to update the distroless dockerfiles as well
+DISTROLESS_BASE_IMAGE ?= gcr.io/distroless/base-debian11:latest
+# DISTROLESS_BASE_IMAGE + ca-certificates
+GLOO_DISTROLESS_BASE_IMAGE ?= $(IMAGE_REGISTRY)/distroless-base:$(VERSION)
+# GLOO_DISTROLESS_BASE_IMAGE + utility binaries (sh, wget, sleep, nc, echo, ls, cat, vi)
+GLOO_DISTROLESS_BASE_WITH_UTILS_IMAGE ?= $(IMAGE_REGISTRY)/distroless-base-with-utils:$(VERSION)
+# BASE_IMAGE used in non distroless variants. Exported for use in goreleaser.yaml.
 export ALPINE_BASE_IMAGE ?= alpine:3.17.6
 
 #----------------------------------------------------------------------------------
@@ -123,25 +142,28 @@ fmt-changed:  ## Format the code with goimports
 mod-download:  ## Download the dependencies
 	go mod download all
 
-.PHONY: mod-tidy-nested
-mod-tidy-nested:  ## Tidy go mod files in nested modules
-	@echo "Tidying hack/utils/applier..." && cd hack/utils/applier && go mod tidy
-	@echo "Tidying test/mocks/mock-ai-provider-server..." && cd test/mocks/mock-ai-provider-server && go mod tidy
-
 .PHONY: mod-tidy
-mod-tidy: mod-download mod-tidy-nested ## Tidy the go mod file
+mod-tidy: mod-download  ## Tidy the go mod file
 	go mod tidy
+
+.PHONY: check-format
+check-format:
+	NOT_FORMATTED=$$(gofmt -l ./pkg/ ./internal/ ./test/) && if [ -n "$$NOT_FORMATTED" ]; then echo These files are not formatted: $$NOT_FORMATTED; exit 1; fi
+
+.PHONY: check-spelling
+check-spelling:
+	./ci/spell.sh check
 
 #----------------------------------------------------------------------------
 # Analyze
 #----------------------------------------------------------------------------
 
-YQ ?= go tool yq
+LINTER_VERSION := $(shell cat .github/workflows/static-analysis.yaml | yq '.jobs.static-analysis.steps.[] | select( .uses == "*golangci/golangci-lint-action*") | .with.version ')
 GO_VERSION := $(shell cat go.mod | grep -E '^go' | awk '{print $$2}')
 GOTOOLCHAIN ?= go$(GO_VERSION)
 
 GOLANGCI_LINT ?= go tool golangci-lint
-ANALYZE_ARGS ?= --fix --verbose
+ANALYZE_ARGS ?= --fast --verbose
 .PHONY: analyze
 analyze:  ## Run golangci-lint. Override options with ANALYZE_ARGS.
 	GOTOOLCHAIN=$(GOTOOLCHAIN) $(GOLANGCI_LINT) run $(ANALYZE_ARGS) ./...
@@ -149,23 +171,19 @@ analyze:  ## Run golangci-lint. Override options with ANALYZE_ARGS.
 #----------------------------------------------------------------------------
 # Info
 #----------------------------------------------------------------------------
-
 .PHONY: envoyversion
 envoyversion: ENVOY_VERSION_TAG ?= $(shell echo $(ENVOY_IMAGE) | cut -d':' -f2)
 envoyversion:
 	echo "Version is $(ENVOY_VERSION_TAG)"
 	echo "Commit for envoyproxy is $(shell curl -s https://raw.githubusercontent.com/solo-io/envoy-gloo/refs/tags/v$(ENVOY_VERSION_TAG)/bazel/repository_locations.bzl | grep "envoy =" -A 4 | grep commit | cut -d'"' -f2)"
 	echo "Current ABI in envoyinit can be found in the cargo.toml's envoy-proxy-dynamic-modules-rust-sdk"
-
 #----------------------------------------------------------------------------------
 # Ginkgo Tests
 #----------------------------------------------------------------------------------
 
-FLAKE_ATTEMPTS ?= 3
 GINKGO_VERSION ?= $(shell echo $(shell go list -m github.com/onsi/ginkgo/v2) | cut -d' ' -f2)
 GINKGO_ENV ?= ACK_GINKGO_RC=true ACK_GINKGO_DEPRECATIONS=$(GINKGO_VERSION)
-
-GINKGO_FLAGS ?= -tags=purego --trace -progress -race --fail-fast -fail-on-pending --randomize-all --compilers=5 --flake-attempts=$(FLAKE_ATTEMPTS)
+GINKGO_FLAGS ?= -tags=purego --trace -progress -race --fail-fast -fail-on-pending --randomize-all --compilers=5 --flake-attempts=3
 GINKGO_REPORT_FLAGS ?= --json-report=test-report.json --junit-report=junit.xml -output-dir=$(OUTPUT_DIR)
 GINKGO_COVERAGE_FLAGS ?= --cover --covermode=atomic --coverprofile=coverage.cov
 TEST_PKG ?= ./... # Default to run all tests
@@ -196,7 +214,7 @@ run-tests: test
 # Performance tests are filtered using a Ginkgo label
 # This means that any tests which do not rely on Ginkgo, will by default be compiled and run
 # Since this is not the desired behavior, we explicitly skip these packages
-run-performance-tests: GINKGO_FLAGS += -skip-package=kgateway,kubernetes/e2e
+run-performance-tests: GINKGO_FLAGS += -skip-package=kgateway,kubernetes/e2e,test/kube2e
 run-performance-tests: GINKGO_FLAGS += --label-filter="performance" ## Run only tests with the Performance label
 run-performance-tests: test
 
@@ -204,6 +222,10 @@ run-performance-tests: test
 run-e2e-tests: TEST_PKG = ./test/e2e/ ## Run all in-memory E2E tests
 run-e2e-tests: GINKGO_FLAGS += --label-filter="end-to-end && !performance"
 run-e2e-tests: test
+
+.PHONY: run-kube-e2e-tests
+run-kube-e2e-tests: TEST_PKG = ./test/kube2e/$(KUBE2E_TESTS) ## Run the legacy Kubernetes E2E Tests in the {KUBE2E_TESTS} package
+run-kube-e2e-tests: test
 
 #----------------------------------------------------------------------------------
 # Env test
@@ -221,7 +243,7 @@ envtest-path: ## Set the envtest path
 #----------------------------------------------------------------------------------
 
 GO_TEST_ENV ?=
-# Testing flags: https://pkg.go.dev/cmd/go#hdr-Testing_flags
+# Testings flags: https://pkg.go.dev/cmd/go#hdr-Testing_flags
 # The default timeout for a suite is 10 minutes, but this can be overridden by setting the -timeout flag. Currently set
 # to 25 minutes based on the time it takes to run the longest test setup (kgateway_test).
 GO_TEST_ARGS ?= -timeout=25m -cpu=4 -race -outputdir=$(OUTPUT_DIR)
@@ -274,7 +296,7 @@ clean-gen:
 	rm -rf api/applyconfiguration
 	rm -rf pkg/generated/openapi
 	rm -rf pkg/client
-	rm -f install/helm/kgateway-crds/templates/gateway.kgateway.dev_*.yaml
+	rm -rf install/helm/kgateway-crds/templates
 
 .PHONY: clean-tests
 clean-tests:
@@ -291,7 +313,7 @@ clean-test-logs:
 	rm -rf $(TEST_LOG_DIR)
 
 #----------------------------------------------------------------------------------
-# Generated Code
+# Generated Code and Docs
 #----------------------------------------------------------------------------------
 
 .PHONY: verify
@@ -303,8 +325,9 @@ generate-all: generated-code
 
 # Generates all required code, cleaning and formatting as well; this target is executed in CI
 .PHONY: generated-code
-generated-code: clean-gen go-generate-all mod-tidy
-generated-code: generate-licenses
+generated-code: clean-gen go-generate-all getter-check mod-tidy
+generated-code: update-licenses
+# generated-code: generate-crd-reference-docs
 generated-code: fmt
 
 .PHONY: go-generate-all
@@ -318,17 +341,25 @@ go-generate-apis: ## Run all go generate directives in the repo, including codeg
 go-generate-mocks: ## Runs all generate directives for mockgen in the repo
 	GO111MODULE=on go generate -run="mockgen" ./...
 
-.PHONY: generate-licenses
-generate-licenses: ## Generate the licenses for the project
-	GO111MODULE=on go run hack/utils/oss_compliance/oss_compliance.go osagen -c "GNU General Public License v2.0,GNU General Public License v3.0,GNU Lesser General Public License v2.1,GNU Lesser General Public License v3.0,GNU Affero General Public License v3.0"
-	GO111MODULE=on go run hack/utils/oss_compliance/oss_compliance.go osagen -s "Mozilla Public License 2.0,GNU General Public License v2.0,GNU General Public License v3.0,GNU Lesser General Public License v2.1,GNU Lesser General Public License v3.0,GNU Affero General Public License v3.0"> hack/utils/oss_compliance/osa_provided.md
-	GO111MODULE=on go run hack/utils/oss_compliance/oss_compliance.go osagen -i "Mozilla Public License 2.0"> hack/utils/oss_compliance/osa_included.md
+PYTHON_DIR := $(ROOTDIR)/python
+
+.PHONY: generate-ai-extension-apis
+generate-ai-extension-apis:
+ifeq ($(SKIP_VENV), true)
+	ENVOY_VERSION=$(UPSTREAM_ENVOY_VERSION) $(PYTHON_DIR)/scripts/genproto.sh
+else
+	( \
+		python3 -m venv .pyenv; \
+		. .pyenv/bin/activate; \
+		pip3 install -r $(PYTHON_DIR)/scripts/requirements.txt; \
+		ENVOY_VERSION=$(UPSTREAM_ENVOY_VERSION) $(PYTHON_DIR)/scripts/genproto.sh; \
+		rm -rf .pyenv; \
+	)
+endif
 
 #----------------------------------------------------------------------------------
 # AI Extensions ExtProc Server
 #----------------------------------------------------------------------------------
-
-PYTHON_DIR := $(ROOTDIR)/python
 
 export AI_EXTENSION_IMAGE_REPO ?= kgateway-ai-extension
 .PHONY: kgateway-ai-extension-docker
@@ -337,15 +368,52 @@ kgateway-ai-extension-docker:
 		--build-arg PYTHON_DIR=python \
 		-t  $(IMAGE_REGISTRY)/kgateway-ai-extension:$(VERSION)
 
+GETTERCHECK ?= go tool github.com/saiskee/gettercheck
+# Ensures that accesses for fields which have "getter" functions are exclusively done via said "getter" functions
+# TODO: do we still want this?
+.PHONY: getter-check
+getter-check: ## Runs all generate directives for mockgen in the repo
+	$(GETTERCHECK) -ignoretests -ignoregenerated -write ./internal/kgateway/...
+
+#----------------------------------------------------------------------------------
+# Distroless base images
+#----------------------------------------------------------------------------------
+
+DISTROLESS_DIR=internal/distroless
+DISTROLESS_OUTPUT_DIR=$(OUTPUT_DIR)/$(DISTROLESS_DIR)
+
+$(DISTROLESS_OUTPUT_DIR)/Dockerfile: $(DISTROLESS_DIR)/Dockerfile
+	mkdir -p $(DISTROLESS_OUTPUT_DIR)
+	cp $< $@
+
+.PHONY: distroless-docker
+distroless-docker: $(DISTROLESS_OUTPUT_DIR)/Dockerfile
+	docker buildx build $(LOAD_OR_PUSH) $(PLATFORM_MULTIARCH) $(DISTROLESS_OUTPUT_DIR) -f $(DISTROLESS_OUTPUT_DIR)/Dockerfile \
+		--build-arg PACKAGE_DONOR_IMAGE=$(PACKAGE_DONOR_IMAGE) \
+		--build-arg BASE_IMAGE=$(DISTROLESS_BASE_IMAGE) \
+		-t $(GLOO_DISTROLESS_BASE_IMAGE)
+
+$(DISTROLESS_OUTPUT_DIR)/Dockerfile.utils: $(DISTROLESS_DIR)/Dockerfile.utils
+	mkdir -p $(DISTROLESS_OUTPUT_DIR)
+	cp $< $@
+
+.PHONY: distroless-with-utils-docker
+distroless-with-utils-docker: distroless-docker $(DISTROLESS_OUTPUT_DIR)/Dockerfile.utils
+	docker buildx build $(LOAD_OR_PUSH) $(PLATFORM_MULTIARCH) $(DISTROLESS_OUTPUT_DIR) -f $(DISTROLESS_OUTPUT_DIR)/Dockerfile.utils \
+		--build-arg UTILS_DONOR_IMAGE=$(UTILS_DONOR_IMAGE) \
+		--build-arg BASE_IMAGE=$(GLOO_DISTROLESS_BASE_IMAGE) \
+		-t  $(GLOO_DISTROLESS_BASE_WITH_UTILS_IMAGE)
+
 #----------------------------------------------------------------------------------
 # Controller
 #----------------------------------------------------------------------------------
 
-K8S_GATEWAY_SOURCES=$(call get_sources,cmd/kgateway internal/kgateway pkg/ api/)
-CONTROLLER_OUTPUT_DIR=$(OUTPUT_DIR)/internal/kgateway
+K8S_GATEWAY_DIR=internal/kgateway
+K8S_GATEWAY_SOURCES=$(call get_sources,$(K8S_GATEWAY_DIR))
+CONTROLLER_OUTPUT_DIR=$(OUTPUT_DIR)/$(K8S_GATEWAY_DIR)
 export CONTROLLER_IMAGE_REPO ?= kgateway
 
-# We include the files in K8S_GATEWAY_SOURCES as dependencies to the kgateway build
+# We include the files in EDGE_GATEWAY_DIR and K8S_GATEWAY_DIR as dependencies to the gloo build
 # so changes in those directories cause the make target to rebuild
 $(CONTROLLER_OUTPUT_DIR)/kgateway-linux-$(GOARCH): $(K8S_GATEWAY_SOURCES)
 	$(GO_BUILD_FLAGS) GOOS=linux go build -ldflags='$(LDFLAGS)' -gcflags='$(GCFLAGS)' -o $@ ./cmd/kgateway/...
@@ -362,6 +430,18 @@ kgateway-docker: $(CONTROLLER_OUTPUT_DIR)/kgateway-linux-$(GOARCH) $(CONTROLLER_
 		--build-arg GOARCH=$(GOARCH) \
 		--build-arg ENVOY_IMAGE=$(ENVOY_IMAGE) \
 		-t $(IMAGE_REGISTRY)/$(CONTROLLER_IMAGE_REPO):$(VERSION)
+
+$(CONTROLLER_OUTPUT_DIR)/Dockerfile.distroless: cmd/kgateway/Dockerfile.distroless
+	cp $< $@
+
+# Explicitly specify the base image is amd64 as we only build the amd64 flavour of envoy
+.PHONY: kgateway-distroless-docker
+kgateway-distroless-docker: $(CONTROLLER_OUTPUT_DIR)/kgateway-linux-$(GOARCH) $(CONTROLLER_OUTPUT_DIR)/Dockerfile.distroless distroless-with-utils-docker
+	docker buildx build --load $(PLATFORM) $(CONTROLLER_OUTPUT_DIR) -f $(CONTROLLER_OUTPUT_DIR)/Dockerfile.distroless \
+		--build-arg GOARCH=$(GOARCH) \
+		--build-arg ENVOY_IMAGE=$(ENVOY_IMAGE) \
+		--build-arg BASE_IMAGE=$(GLOO_DISTROLESS_BASE_WITH_UTILS_IMAGE) \
+		-t $(IMAGE_REGISTRY)/$(CONTROLLER_IMAGE_REPO):$(VERSION)-distroless
 
 #----------------------------------------------------------------------------------
 # SDS Server - gRPC server for serving Secret Discovery Service config
@@ -388,27 +468,37 @@ sds-docker: $(SDS_OUTPUT_DIR)/sds-linux-$(GOARCH) $(SDS_OUTPUT_DIR)/Dockerfile.s
 		--build-arg BASE_IMAGE=$(ALPINE_BASE_IMAGE) \
 		-t $(IMAGE_REGISTRY)/$(SDS_IMAGE_REPO):$(VERSION)
 
+$(SDS_OUTPUT_DIR)/Dockerfile.sds.distroless: cmd/sds/Dockerfile.distroless
+	cp $< $@
+
+.PHONY: sds-distroless-docker
+sds-distroless-docker: $(SDS_OUTPUT_DIR)/sds-linux-$(GOARCH) $(SDS_OUTPUT_DIR)/Dockerfile.sds.distroless distroless-with-utils-docker
+	docker buildx build --load $(PLATFORM) $(SDS_OUTPUT_DIR) -f $(SDS_OUTPUT_DIR)/Dockerfile.sds.distroless \
+		--build-arg GOARCH=$(GOARCH) \
+		--build-arg BASE_IMAGE=$(GLOO_DISTROLESS_BASE_WITH_UTILS_IMAGE) \
+		-t $(IMAGE_REGISTRY)/$(SDS_IMAGE_REPO):$(VERSION)-distroless
+
 #----------------------------------------------------------------------------------
 # Envoy init (BASE/SIDECAR)
 #----------------------------------------------------------------------------------
 
-ENVOYINIT_DIR=cmd/envoyinit
+ENVOYINIT_DIR=internal/envoyinit
 ENVOYINIT_SOURCES=$(call get_sources,$(ENVOYINIT_DIR))
 ENVOYINIT_OUTPUT_DIR=$(OUTPUT_DIR)/$(ENVOYINIT_DIR)
 export ENVOYINIT_IMAGE_REPO ?= envoy-wrapper
 
 $(ENVOYINIT_OUTPUT_DIR)/envoyinit-linux-$(GOARCH): $(ENVOYINIT_SOURCES)
-	$(GO_BUILD_FLAGS) GOOS=linux go build -ldflags='$(LDFLAGS)' -gcflags='$(GCFLAGS)' -o $@ ./cmd/envoyinit/...
+	$(GO_BUILD_FLAGS) GOOS=linux go build -ldflags='$(LDFLAGS)' -gcflags='$(GCFLAGS)' -o $@ ./internal/envoyinit/cmd/...
 
 .PHONY: envoyinit
 envoyinit: $(ENVOYINIT_OUTPUT_DIR)/envoyinit-linux-$(GOARCH)
 
 # TODO(nfuden) cheat the process for now with -r but try to find a cleaner method
-$(ENVOYINIT_OUTPUT_DIR)/Dockerfile.envoyinit: cmd/envoyinit/Dockerfile
-	cp  -r  internal/envoyinit/rustformations $(ENVOYINIT_OUTPUT_DIR)
+$(ENVOYINIT_OUTPUT_DIR)/Dockerfile.envoyinit: internal/envoyinit/Dockerfile.envoyinit
+	cp  -r  ${ENVOYINIT_DIR}/rustformations $(ENVOYINIT_OUTPUT_DIR)
 	cp $< $@
 
-$(ENVOYINIT_OUTPUT_DIR)/docker-entrypoint.sh: cmd/envoyinit/docker-entrypoint.sh
+$(ENVOYINIT_OUTPUT_DIR)/docker-entrypoint.sh: internal/envoyinit/cmd/docker-entrypoint.sh
 	cp $< $@
 
 .PHONY: envoy-wrapper-docker
@@ -418,17 +508,29 @@ envoy-wrapper-docker: $(ENVOYINIT_OUTPUT_DIR)/envoyinit-linux-$(GOARCH) $(ENVOYI
 		--build-arg ENVOY_IMAGE=$(ENVOY_IMAGE) \
 		-t $(IMAGE_REGISTRY)/$(ENVOYINIT_IMAGE_REPO):$(VERSION)
 
+$(ENVOYINIT_OUTPUT_DIR)/Dockerfile.envoyinit.distroless: internal/envoyinit/Dockerfile.envoyinit.distroless
+	cp $< $@
+
+# Explicitly specify the base image is amd64 as we only build the amd64 flavour of envoy
+.PHONY: envoy-wrapper-distroless-docker
+envoy-wrapper-distroless-docker: $(ENVOYINIT_OUTPUT_DIR)/envoyinit-linux-$(GOARCH) $(ENVOYINIT_OUTPUT_DIR)/Dockerfile.envoyinit.distroless $(ENVOYINIT_OUTPUT_DIR)/docker-entrypoint.sh distroless-with-utils-docker
+	docker buildx build --load $(PLATFORM) $(ENVOYINIT_OUTPUT_DIR) -f $(ENVOYINIT_OUTPUT_DIR)/Dockerfile.envoyinit.distroless \
+		--build-arg GOARCH=$(GOARCH) \
+		--build-arg ENVOY_IMAGE=$(ENVOY_IMAGE) \
+		--build-arg BASE_IMAGE=$(GLOO_DISTROLESS_BASE_WITH_UTILS_IMAGE) \
+		-t $(IMAGE_REGISTRY)/$(ENVOYINIT_IMAGE_REPO):$(VERSION)-distroless
+
 #----------------------------------------------------------------------------------
 # Helm
 #----------------------------------------------------------------------------------
 
-HELM ?= go tool helm
+HELM ?= helm
 HELM_PACKAGE_ARGS ?= --version $(VERSION)
 HELM_CHART_DIR=install/helm/kgateway
 HELM_CHART_DIR_CRD=install/helm/kgateway-crds
 
 .PHONY: package-kgateway-charts
-package-kgateway-charts: package-kgateway-chart package-kgateway-crd-chart ## Package the kgateway charts
+package-kgateway-charts: package-kgateway-chart package-kgateway-crd-chart
 
 .PHONY: package-kgateway-chart
 package-kgateway-chart: ## Package the kgateway charts
@@ -441,24 +543,6 @@ package-kgateway-crd-chart: ## Package the kgateway crd chart
 	mkdir -p $(TEST_ASSET_DIR); \
 	$(HELM) package $(HELM_PACKAGE_ARGS) --destination $(TEST_ASSET_DIR) $(HELM_CHART_DIR_CRD); \
 	$(HELM) repo index $(TEST_ASSET_DIR);
-
-.PHONY: release-charts
-release-charts: package-kgateway-charts ## Release the kgateway charts
-	$(HELM) push $(TEST_ASSET_DIR)/kgateway-$(VERSION).tgz oci://$(IMAGE_REGISTRY)/charts
-	$(HELM) push $(TEST_ASSET_DIR)/kgateway-crds-$(VERSION).tgz oci://$(IMAGE_REGISTRY)/charts
-
-.PHONY: deploy-kgateway-crd-chart
-deploy-kgateway-crd-chart: ## Deploy the kgateway crd chart
-	$(HELM) upgrade --install kgateway-crds $(TEST_ASSET_DIR)/kgateway-crds-$(VERSION).tgz --namespace $(INSTALL_NAMESPACE) --create-namespace
-
-HELM_ADDITIONAL_VALUES ?= hack/helm/dev.yaml
-.PHONY: deploy-kgateway-chart
-deploy-kgateway-chart: ## Deploy the kgateway chart
-	$(HELM) upgrade --install kgateway $(TEST_ASSET_DIR)/kgateway-$(VERSION).tgz \
-	--namespace $(INSTALL_NAMESPACE) --create-namespace \
-	--set image.registry=$(IMAGE_REGISTRY) \
-	--set image.tag=$(VERSION) \
-	-f $(HELM_ADDITIONAL_VALUES)
 
 .PHONY: lint-kgateway-charts
 lint-kgateway-charts: ## Lint the kgateway charts
@@ -479,64 +563,107 @@ release: ## Create a release using goreleaser
 	GORELEASER_CURRENT_TAG=$(GORELEASER_CURRENT_TAG) $(GORELEASER) release $(GORELEASER_ARGS) --timeout $(GORELEASER_TIMEOUT)
 
 #----------------------------------------------------------------------------------
-# Development
+# Docker
 #----------------------------------------------------------------------------------
 
-KIND ?= go tool kind
+docker-retag-%-distroless:
+	docker tag $(ORIGINAL_IMAGE_REGISTRY)/$*:$(VERSION)-distroless $(IMAGE_REGISTRY)/$*:$(VERSION)-distroless
+
+docker-retag-%:
+	docker tag $(ORIGINAL_IMAGE_REGISTRY)/$*:$(VERSION) $(IMAGE_REGISTRY)/$*:$(VERSION)
+
+docker-push-%-distroless:
+	docker push $(IMAGE_REGISTRY)/$*:$(VERSION)-distroless
+
+docker-push-%:
+	docker push $(IMAGE_REGISTRY)/$*:$(VERSION)
+
+.PHONY: docker-standard
+docker-standard: kgateway-docker ## Build docker images (standard only)
+docker-standard: envoy-wrapper-docker
+docker-standard: sds-docker
+docker-standard: kgateway-ai-extension-docker # single image variant
+
+.PHONY: docker-distroless
+docker-distroless: kgateway-distroless-docker ## Build docker images (distroless only)
+docker-distroless: envoy-wrapper-distroless-docker
+docker-distroless: sds-distroless-docker
+docker-distroless: kgateway-ai-extension-docker # single image variant
+
+IMAGE_VARIANT ?= all
+# Build docker images using the defined IMAGE_REGISTRY, VERSION
+.PHONY: docker
+docker: ## Build all docker images (standard and distroless)
+docker: # Standard images
+ifeq ($(IMAGE_VARIANT),$(filter $(IMAGE_VARIANT),all standard))
+docker: docker-standard
+endif # standard images
+docker: # Distroless images
+ifeq ($(IMAGE_VARIANT),$(filter $(IMAGE_VARIANT),all distroless))
+docker: docker-distroless
+endif # distroless images
+
+.PHONY: docker-standard-push
+docker-standard-push: docker-push-kgateway
+docker-standard-push: docker-push-envoy-wrapper
+docker-standard-push: docker-push-sds
+docker-standard-push: docker-push-kgateway-ai-extension # single image variant
+
+.PHONY: docker-distroless-push
+docker-distroless-push: docker-push-kgateway-distroless
+docker-distroless-push: docker-push-envoy-wrapper-distroless
+docker-distroless-push: docker-push-sds-distroless
+docker-distroless-push: docker-push-kgateway-ai-extension # single image variant
+
+# Push docker images to the defined IMAGE_REGISTRY
+.PHONY: docker-push
+docker-push: # Standard images
+ifeq ($(IMAGE_VARIANT),$(filter $(IMAGE_VARIANT),all standard))
+docker-push: docker-standard-push
+endif # standard images
+docker-push: # Distroless images
+ifeq ($(IMAGE_VARIANT),$(filter $(IMAGE_VARIANT),all distroless))
+docker-push: docker-distroless-push
+endif # distroless images
+
+.PHONY: docker-standard-retag
+docker-standard-retag: docker-retag-kgateway
+docker-standard-retag: docker-retag-envoy-wrapper
+docker-standard-retag: docker-retag-sds
+docker-standard-retag: docker-retag-kgateway-ai-extension # single image variant
+
+.PHONY: docker-distroless-retag
+docker-distroless-retag: docker-retag-kgateway-distroless
+docker-distroless-retag: docker-retag-envoy-wrapper-distroless
+docker-distroless-retag: docker-retag-sds-distroless
+docker-distroless-retag: docker-retag-kgateway-ai-extension # single image variant
+
+# Re-tag docker images previously pushed to the ORIGINAL_IMAGE_REGISTRY,
+# and tag them with a secondary repository, defined at IMAGE_REGISTRY
+.PHONY: docker-retag
+docker-retag: # Standard images
+ifeq ($(IMAGE_VARIANT),$(filter $(IMAGE_VARIANT),all standard))
+docker-retag: docker-standard-retag
+endif # standard images
+docker-retag: # Distroless images
+ifeq ($(IMAGE_VARIANT),$(filter $(IMAGE_VARIANT),all distroless))
+docker-retag: docker-distroless-retag
+endif # distroless images
+
+#----------------------------------------------------------------------------------
+# Build assets for Kube2e tests
+#----------------------------------------------------------------------------------
+
 CLUSTER_NAME ?= kind
 INSTALL_NAMESPACE ?= kgateway-system
 
-.PHONY: kind-create
-kind-create: ## Create a KinD cluster
-	$(KIND) get clusters | grep $(CLUSTER_NAME) || $(KIND) create cluster --name $(CLUSTER_NAME)
+KIND ?= go tool kind
 
-CONFORMANCE_CHANNEL ?= experimental
-CONFORMANCE_VERSION ?= v1.3.0
-.PHONY: gw-api-crds
-gw-api-crds: ## Install the Gateway API CRDs
-ifeq ($(CONFORMANCE_CHANNEL), standard)
-	kubectl apply --kustomize "https://github.com/kubernetes-sigs/gateway-api/config/crd?ref=$(CONFORMANCE_VERSION)"
-else
-	kubectl apply --kustomize "https://github.com/kubernetes-sigs/gateway-api/config/crd/$(CONFORMANCE_CHANNEL)?ref=$(CONFORMANCE_VERSION)"
-endif
-
-# The version of the k8s gateway api inference extension CRDs to install.
-GIE_CRD_VERSION ?= $(shell go list -m sigs.k8s.io/gateway-api-inference-extension | awk '{print $$2}')
-
-.PHONY: gie-crds
-gie-crds: ## Install the Gateway API Inference Extension CRDs
-	kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$(GIE_CRD_VERSION)/manifests.yaml"
-
-.PHONY: kind-metallb
-metallb: ## Install the MetalLB load balancer
-	./hack/kind/setup-metalllb-on-kind.sh
-
-.PHONY: deploy-kgateway
-deploy-kgateway: package-kgateway-charts deploy-kgateway-crd-chart deploy-kgateway-chart ## Deploy the kgateway chart and CRDs
-
-.PHONY: setup
-setup: kind-create kind-build-and-load gw-api-crds gie-crds metallb package-kgateway-charts ## Set up basic infrastructure (kind cluster, images, CRDs, MetalLB)
-
-.PHONY: run
-run: setup deploy-kgateway  ## Set up complete development environment
-
-.PHONY: undeploy
-undeploy: undeploy-kgateway undeploy-kgateway-crds ## Undeploy the application from the cluster
-
-.PHONY: undeploy-kgateway
-undeploy-kgateway: ## Undeploy the core chart from the cluster
-	$(HELM) uninstall kgateway --namespace $(INSTALL_NAMESPACE) || true
-
-.PHONY: undeploy-kgateway-crds
-undeploy-kgateway-crds: ## Undeploy the CRD chart from the cluster
-	$(HELM) uninstall kgateway-crds --namespace $(INSTALL_NAMESPACE) || true
-
-#----------------------------------------------------------------------------------
-# Build assets for kubernetes e2e tests
-#----------------------------------------------------------------------------------
-
-kind-setup: ## Set up the KinD cluster. Deprecated: use kind-create instead.
+kind-setup:
 	VERSION=${VERSION} CLUSTER_NAME=${CLUSTER_NAME} ./hack/kind/setup-kind.sh
+
+kind-load-%-distroless:
+	$(KIND) load docker-image $(IMAGE_REGISTRY)/$*:$(VERSION)-distroless --name $(CLUSTER_NAME)
 
 kind-load-%:
 	$(KIND) load docker-image $(IMAGE_REGISTRY)/$*:$(VERSION) --name $(CLUSTER_NAME)
@@ -555,7 +682,7 @@ kind-build-and-load-%: %-docker kind-load-% ; ## Use to build specified image an
 kind-set-image-%:
 	kubectl rollout pause deployment $* -n $(INSTALL_NAMESPACE) || true
 	kubectl set image deployment/$* $*=$(IMAGE_REGISTRY)/$*:$(VERSION) -n $(INSTALL_NAMESPACE)
-	kubectl patch deployment $* -n $(INSTALL_NAMESPACE) -p '{"spec": {"template":{"metadata":{"annotations":{"kgateway-kind-last-update":"$(shell date)"}}}} }'
+	kubectl patch deployment $* -n $(INSTALL_NAMESPACE) -p '{"spec": {"template":{"metadata":{"annotations":{"gloo-kind-last-update":"$(shell date)"}}}} }'
 	kubectl rollout resume deployment $* -n $(INSTALL_NAMESPACE)
 
 # Reload an image in KinD
@@ -566,27 +693,84 @@ kind-set-image-%:
 # Envoy image may be specified via ENVOY_IMAGE on the command line or at the top of this file
 kind-reload-%: kind-build-and-load-% kind-set-image-% ; ## Use to build specified image, load it into kind, and restart its deployment
 
+# This is an alias to remedy the fact that the deployment is called gateway-proxy
+# but our make targets refer to envoy-wrapper
+kind-reload-envoy-wrapper: kind-build-and-load-envoy-wrapper
+kind-reload-envoy-wrapper:
+	kubectl rollout pause deployment gateway-proxy -n $(INSTALL_NAMESPACE) || true
+	kubectl set image deployment/gateway-proxy gateway-proxy=$(IMAGE_REGISTRY)/envoy-wrapper:$(VERSION) -n $(INSTALL_NAMESPACE)
+	kubectl patch deployment gateway-proxy -n $(INSTALL_NAMESPACE) -p '{"spec": {"template":{"metadata":{"annotations":{"gloo-kind-last-update":"$(shell date)"}}}} }'
+	kubectl rollout resume deployment gateway-proxy -n $(INSTALL_NAMESPACE)
+
+.PHONY: kind-build-and-load-standard
+kind-build-and-load-standard: kind-build-and-load-kgateway
+kind-build-and-load-standard: kind-build-and-load-envoy-wrapper
+kind-build-and-load-standard: kind-build-and-load-sds
+kind-build-and-load-standard: kind-build-and-load-kgateway-ai-extension # single image variant
+
+.PHONY: kind-build-and-load-distroless
+kind-build-and-load-distroless: kind-build-and-load-kgateway-distroless
+kind-build-and-load-distroless: kind-build-and-load-envoy-wrapper-distroless
+kind-build-and-load-distroless: kind-build-and-load-sds-distroless
+kind-build-and-load-distroless: kind-build-and-load-kgateway-ai-extension # single image variant
+
 .PHONY: kind-build-and-load ## Use to build all images and load them into kind
-kind-build-and-load: kind-build-and-load-kgateway
-kind-build-and-load: kind-build-and-load-envoy-wrapper
+kind-build-and-load: # Standard images
+ifeq ($(IMAGE_VARIANT),$(filter $(IMAGE_VARIANT),all standard))
+kind-build-and-load: kind-build-and-load-standard
+endif # standard images
+kind-build-and-load: # Distroless images
+ifeq ($(IMAGE_VARIANT),$(filter $(IMAGE_VARIANT),all distroless))
+kind-build-and-load: kind-build-and-load-distroless
+endif # distroless images
+kind-build-and-load: # As of now the glooctl istio inject command is not smart enough to determine the variant used, so we always build the standard variant of the sds image.
 kind-build-and-load: kind-build-and-load-sds
-kind-build-and-load: kind-build-and-load-kgateway-ai-extension
 
-.PHONY: kind-load ## Use to load all images into kind
-kind-load: kind-load-kgateway
-kind-load: kind-load-envoy-wrapper
+# Load existing images. This can speed up development if the images have already been built / are unchanged
+.PHONY: kind-load-standard
+kind-load-standard: kind-load-kgateway
+kind-load-standard: kind-load-envoy-wrapper
+kind-load-standard: kind-load-sds
+kind-load-standard: kind-load-kgateway-ai-extension # single image variant
+
+.PHONY: kind-build-and-load-distroless
+kind-load-distroless: kind-load-kgateway-distroless
+kind-load-distroless: kind-load-envoy-wrapper-distroless
+kind-load-distroless: kind-load-sds-distroless
+kind-load-distroless: kind-load-kgateway-ai-extension # single image variant
+
+.PHONY: kind-load ## Use to build all images and load them into kind
+kind-load: # Standard images
+ifeq ($(IMAGE_VARIANT),$(filter $(IMAGE_VARIANT),all standard))
+kind-load: kind-load-standard
+endif # standard images
+kind-load: # Distroless images
+ifeq ($(IMAGE_VARIANT),$(filter $(IMAGE_VARIANT),all distroless))
+kind-load: kind-load-distroless
+endif # distroless images
+kind-load: # As of now the glooctl istio inject command is not smart enough to determine the variant used, so we always build the standard variant of the sds image.
 kind-load: kind-load-sds
-kind-load: kind-load-kgateway-ai-extension
 
-#----------------------------------------------------------------------------------
-# A2A Test Server (for agentgateway a2a integration in e2e tests)
-#----------------------------------------------------------------------------------
+define kind_reload_msg
+The kind-reload-% targets exist in order to assist developers with the work cycle of
+build->test->change->build->test. To that end, rebuilding/reloading every image, then
+restarting every deployment is seldom necessary. Consider using kind-reload-% to do so
+for a specific component, or kind-build-and-load to push new images for every component.
+endef
+export kind_reload_msg
+.PHONY: kind-reload
+kind-reload:
+	@echo "$$kind_reload_msg"
 
-TEST_A2A_AGENT_SERVER_DIR := $(ROOTDIR)/test/kubernetes/e2e/features/agentgateway/a2a-example
-.PHONY: test-a2a-agent-docker
-test-a2a-agent-docker:
-	docker buildx build $(LOAD_OR_PUSH) $(PLATFORM_MULTIARCH) -f $(TEST_A2A_AGENT_SERVER_DIR)/Dockerfile $(TEST_A2A_AGENT_SERVER_DIR) \
-		-t $(IMAGE_REGISTRY)/test-a2a-agent:$(VERSION)
+# Useful utility for listing images loaded into the kind cluster
+.PHONY: kind-list-images
+kind-list-images: ## List solo-io images in the kind cluster named {CLUSTER_NAME}
+	docker exec -ti $(CLUSTER_NAME)-control-plane crictl images | grep "solo-io"
+
+# Useful utility for pruning images that were previously loaded into the kind cluster
+.PHONY: kind-prune-images
+kind-prune-images: ## Remove images in the kind cluster named {CLUSTER_NAME}
+	docker exec -ti $(CLUSTER_NAME)-control-plane crictl rmi --prune
 
 #----------------------------------------------------------------------------------
 # AI Extensions Test Server (for mocking AI Providers in e2e tests)
@@ -599,25 +783,6 @@ test-ai-provider-docker:
 		-t $(IMAGE_REGISTRY)/test-ai-provider:$(VERSION)
 
 #----------------------------------------------------------------------------------
-# Load Testing
-#----------------------------------------------------------------------------------
-
-.PHONY: run-load-tests
-run-load-tests: ## Run KGateway load testing suite (requires existing cluster and installation)
-	SKIP_INSTALL=true CLUSTER_NAME=$(CLUSTER_NAME) INSTALL_NAMESPACE=$(INSTALL_NAMESPACE) \
-	go test -v ./test/kubernetes/e2e/tests -run "^TestKgateway$$/^AttachedRoutes$$"
-
-.PHONY: run-load-tests-baseline
-run-load-tests-baseline: ## Run baseline load tests (1000 routes)
-	SKIP_INSTALL=true CLUSTER_NAME=$(CLUSTER_NAME) INSTALL_NAMESPACE=$(INSTALL_NAMESPACE) \
-	go test -v ./test/kubernetes/e2e/tests -run "^TestKgateway$$/^AttachedRoutes$$/^TestAttachedRoutesBaseline$$"
-
-.PHONY: run-load-tests-production
-run-load-tests-production: ## Run production load tests (5000 routes)
-	SKIP_INSTALL=true CLUSTER_NAME=$(CLUSTER_NAME) INSTALL_NAMESPACE=$(INSTALL_NAMESPACE) \
-	go test -v ./test/kubernetes/e2e/tests -run "^TestKgateway$$/^AttachedRoutes$$/^TestAttachedRoutesProduction$$"
-
-#----------------------------------------------------------------------------------
 # Targets for running Kubernetes Gateway API conformance tests
 #----------------------------------------------------------------------------------
 
@@ -628,12 +793,11 @@ $(TEST_ASSET_DIR)/conformance/conformance_test.go:
 	cat $(shell go list -json -m sigs.k8s.io/gateway-api | jq -r '.Dir')/conformance/conformance_test.go >> $@
 	go fmt $@
 
-CONFORMANCE_SUPPORTED_FEATURES ?= -supported-features=GatewayAddressEmpty,HTTPRouteParentRefPort,HTTPRouteRequestMirror,HTTPRouteBackendRequestHeaderModification,HTTPRouteNamedRouteRule,HTTPRouteDestinationPortMatching,HTTPRouteBackendProtocolH2C,HTTPRouteBackendProtocolWebSocket,HTTPRouteBackendTimeout,HTTPRouteHostRewrite,HTTPRouteMethodMatching,HTTPRoutePathRedirect,HTTPRoutePathRewrite,HTTPRoutePortRedirect,HTTPRouteQueryParamMatching,HTTPRouteRequestTimeout,HTTPRouteResponseHeaderModification,HTTPRouteSchemeRedirect
-CONFORMANCE_UNSUPPORTED_FEATURES ?= -exempt-features=GatewayPort8080,GatewayStaticAddresses,GatewayHTTPListenerIsolation,GatewayInfrastructurePropagation,HTTPRouteRequestMultipleMirrors,HTTPRouteRequestPercentageMirror
-CONFORMANCE_SUPPORTED_PROFILES ?= -conformance-profiles=GATEWAY-HTTP,GATEWAY-TLS,GATEWAY-GRPC
+CONFORMANCE_SUPPORTED_FEATURES ?= -supported-features=Gateway,ReferenceGrant,HTTPRoute,HTTPRouteQueryParamMatching,HTTPRouteMethodMatching,HTTPRouteResponseHeaderModification,HTTPRoutePortRedirect,HTTPRouteHostRewrite,HTTPRouteSchemeRedirect,HTTPRoutePathRedirect,HTTPRouteHostRewrite,HTTPRoutePathRewrite,HTTPRouteRequestMirror,TLSRoute,HTTPRouteBackendProtocolH2C
+CONFORMANCE_SUPPORTED_PROFILES ?= -conformance-profiles=GATEWAY-HTTP
 CONFORMANCE_GATEWAY_CLASS ?= kgateway
 CONFORMANCE_REPORT_ARGS ?= -report-output=$(TEST_ASSET_DIR)/conformance/$(VERSION)-report.yaml -organization=kgateway-dev -project=kgateway -version=$(VERSION) -url=github.com/kgateway-dev/kgateway -contact=github.com/kgateway-dev/kgateway/issues/new/choose
-CONFORMANCE_ARGS := -gateway-class=$(CONFORMANCE_GATEWAY_CLASS) $(CONFORMANCE_SUPPORTED_FEATURES) $(CONFORMANCE_UNSUPPORTED_FEATURES) $(CONFORMANCE_SUPPORTED_PROFILES) $(CONFORMANCE_REPORT_ARGS)
+CONFORMANCE_ARGS := -gateway-class=$(CONFORMANCE_GATEWAY_CLASS) $(CONFORMANCE_SUPPORTED_FEATURES) $(CONFORMANCE_SUPPORTED_PROFILES) $(CONFORMANCE_REPORT_ARGS)
 
 .PHONY: conformance ## Run the conformance test suite
 conformance: $(TEST_ASSET_DIR)/conformance/conformance_test.go
@@ -646,98 +810,14 @@ conformance-%: $(TEST_ASSET_DIR)/conformance/conformance_test.go
 	-run-test=$*
 
 #----------------------------------------------------------------------------------
-# Targets for running Gateway API Inference Extension conformance tests
+# Third Party License Management
 #----------------------------------------------------------------------------------
 
-# Reporting flags, identical to CONFORMANCE_REPORT_ARGS but with "inference-"
-GIE_CONFORMANCE_REPORT_ARGS ?= \
-    -report-output=$(TEST_ASSET_DIR)/conformance/inference-$(VERSION)-report.yaml \
-    -organization=kgateway-dev \
-    -project=kgateway \
-    -version=$(VERSION) \
-    -url=github.com/kgateway-dev/kgateway \
-    -contact=github.com/kgateway-dev/kgateway/issues/new/choose
-
-# The args to pass into the Gateway API Inference Extension conformance test suite.
-GIE_CONFORMANCE_ARGS := \
-    -gateway-class=$(CONFORMANCE_GATEWAY_CLASS) \
-    $(GIE_CONFORMANCE_REPORT_ARGS)
-
-INFERENCE_CONFORMANCE_DIR := $(shell go list -m -f '{{.Dir}}' sigs.k8s.io/gateway-api-inference-extension)/conformance
-
-# TODO [danehans]: Remove `kubectl wait` when gateway-api-inference-extension/issues/1315 is fixed.
-.PHONY: gie-conformance
-gie-conformance: gie-crds ## Run the Gateway API Inference Extension conformance suite
-	@mkdir -p $(TEST_ASSET_DIR)/conformance
-	go test -mod=mod -ldflags='$(LDFLAGS)' \
-	    -tags conformance \
-	    -timeout=25m \
-	    -v $(INFERENCE_CONFORMANCE_DIR) \
-	    -args $(GIE_CONFORMANCE_ARGS)
-	@echo "Waiting for gateway-conformance-infra namespace to terminate..."
-	kubectl wait ns gateway-conformance-infra --for=delete --timeout=2m || true
-
-# TODO [danehans]: Remove `kubectl wait` when gateway-api-inference-extension/issues/1315 is fixed.
-.PHONY: gie-conformance-%
-gie-conformance-%: gie-crds ## Run only the specified Gateway API Inference Extension conformance test by ShortName
-	@mkdir -p $(TEST_ASSET_DIR)/conformance
-	go test -mod=mod -ldflags='$(LDFLAGS)' \
-	    -tags conformance \
-	    -timeout=25m \
-	    -v $(INFERENCE_CONFORMANCE_DIR) \
-	    -args $(GIE_CONFORMANCE_ARGS) -run-test=$*
-	@echo "Waiting for gateway-conformance-infra namespace to terminate..."
-	kubectl wait ns gateway-conformance-infra --for=delete --timeout=2m || true
-
-# An alias to run both Gateway API and Inference Extension conformance tests.
-.PHONY: all-conformance
-all-conformance: conformance gie-conformance agw-conformance ## Run all conformance test suites
-	@echo "All conformance suites have completed."
-
-#----------------------------------------------------------------------------------
-# Targets for running Agent Gateway conformance tests
-#----------------------------------------------------------------------------------
-
-# Agent Gateway conformance test configuration
-AGW_CONFORMANCE_SUPPORTED_FEATURES ?= -supported-features=HTTPRouteBackendProtocolH2C,HTTPRouteBackendProtocolWebSocket,HTTPRouteHostRewrite,HTTPRouteMethodMatching,HTTPRoutePathRedirect,HTTPRoutePathRewrite,HTTPRoutePortRedirect,HTTPRouteQueryParamMatching,HTTPRouteResponseHeaderModification,HTTPRouteSchemeRedirect
-AGW_CONFORMANCE_UNSUPPORTED_FEATURES ?= $(CONFORMANCE_UNSUPPORTED_FEATURES)
-AGW_CONFORMANCE_SUPPORTED_PROFILES ?= -conformance-profiles=GATEWAY-HTTP
-AGW_CONFORMANCE_GATEWAY_CLASS ?= agentgateway
-AGW_CONFORMANCE_REPORT_ARGS ?= -report-output=$(TEST_ASSET_DIR)/conformance/agw-$(VERSION)-report.yaml -organization=kgateway-dev -project=kgateway -version=$(VERSION) -url=github.com/kgateway-dev/kgateway -contact=github.com/kgateway-dev/kgateway/issues/new/choose
-AGW_CONFORMANCE_ARGS := -gateway-class=$(AGW_CONFORMANCE_GATEWAY_CLASS) $(AGW_CONFORMANCE_SUPPORTED_FEATURES) $(AGW_CONFORMANCE_UNSUPPORTED_FEATURES) $(AGW_CONFORMANCE_SUPPORTED_PROFILES) $(AGW_CONFORMANCE_REPORT_ARGS)
-
-.PHONY: agw-conformance ## Run the agent gateway conformance test suite
-agw-conformance: $(TEST_ASSET_DIR)/conformance/conformance_test.go
-	CONFORMANCE_GATEWAY_CLASS=$(AGW_CONFORMANCE_GATEWAY_CLASS) go test -mod=mod -ldflags='$(LDFLAGS)' -tags conformance -test.v $(TEST_ASSET_DIR)/conformance/... -args $(AGW_CONFORMANCE_ARGS)
-
-# Run only the specified agent gateway conformance test
-agw-conformance-%: $(TEST_ASSET_DIR)/conformance/conformance_test.go
-	CONFORMANCE_GATEWAY_CLASS=$(AGW_CONFORMANCE_GATEWAY_CLASS) go test -mod=mod -ldflags='$(LDFLAGS)' -tags conformance -test.v $(TEST_ASSET_DIR)/conformance/... -args $(AGW_CONFORMANCE_ARGS) \
-	-run-test=$*
-
-#----------------------------------------------------------------------------------
-# Dependency Bumping
-#----------------------------------------------------------------------------------
-
-.PHONY: bump-gtw
-bump-gtw: ## Bump Gateway API deps to $DEP_VERSION
-ifndef DEP_VERSION
-	$(error DEP_VERSION is not set, e.g. make bump-gtw DEP_VERSION=v1.3.0)
-endif
-	@echo "Bumping Gateway API to $(DEP_VERSION)"
-	@$(SHELL) hack/bump_deps.sh gtw $(DEP_VERSION)
-	@echo "Updating licensing..."
-	@$(MAKE) generate-licenses
-
-.PHONY: bump-gie
-bump-gie: ## Bump Gateway API Inference Extension to $DEP_VERSION
-ifndef DEP_VERSION
-	$(error DEP_VERSION is not set, e.g. make bump-gie DEP_VERSION=v0.5.0)
-endif
-	@echo ">>> Bumping Gateway API Inference Extension to $(DEP_VERSION)"
-	@$(SHELL) hack/bump_deps.sh gie $(DEP_VERSION)
-	@echo "Updating licensing..."
-	@$(MAKE) generate-licenses
+.PHONY: update-licenses
+update-licenses: ## Update the licenses for the project
+	GO111MODULE=on go run hack/utils/oss_compliance/oss_compliance.go osagen -c "GNU General Public License v2.0,GNU General Public License v3.0,GNU Lesser General Public License v2.1,GNU Lesser General Public License v3.0,GNU Affero General Public License v3.0"
+	GO111MODULE=on go run hack/utils/oss_compliance/oss_compliance.go osagen -s "Mozilla Public License 2.0,GNU General Public License v2.0,GNU General Public License v3.0,GNU Lesser General Public License v2.1,GNU Lesser General Public License v3.0,GNU Affero General Public License v3.0"> hack/utils/oss_compliance/osa_provided.md
+	GO111MODULE=on go run hack/utils/oss_compliance/oss_compliance.go osagen -i "Mozilla Public License 2.0"> hack/utils/oss_compliance/osa_included.md
 
 #----------------------------------------------------------------------------------
 # Printing makefile variables utility

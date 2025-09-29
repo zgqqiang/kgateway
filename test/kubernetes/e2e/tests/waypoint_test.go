@@ -17,7 +17,7 @@ func TestKgatewayWaypoint(t *testing.T) {
 
 	// Set Istio version if not already set
 	if os.Getenv("ISTIO_VERSION") == "" {
-		os.Setenv("ISTIO_VERSION", "1.25.1") // Using minimum required version that supports multiple TargetRef types for Istio Authz policies.
+		os.Setenv("ISTIO_VERSION", "1.23.0") // Using minimum required version for ambient mode
 	}
 
 	installNs, nsEnvPredefined := envutils.LookupOrDefault(testutils.InstallNamespace, "kgateway-waypoint-test")
@@ -26,7 +26,7 @@ func TestKgatewayWaypoint(t *testing.T) {
 		&install.Context{
 			InstallNamespace:          installNs,
 			ProfileValuesManifestFile: e2e.CommonRecommendationManifest,
-			ValuesManifestFile:        e2e.ManifestPath("waypoint-enabled-helm.yaml"),
+			ValuesManifestFile:        e2e.EmptyValuesManifestPath,
 		},
 	)
 

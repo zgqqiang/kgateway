@@ -29,12 +29,12 @@ var _ = Describe("Downward", func() {
 
 	It("should retrieve labels", func() {
 		data["labels"] = []byte(`
-		kgateway="kgateway.dev"
+		solo="solo.io"
 
 		`)
 
 		res := RetrieveDownwardAPIFrom(reader, envreader)
-		Expect(res.PodLabels()).To(HaveKeyWithValue("kgateway", "kgateway.dev"))
+		Expect(res.PodLabels()).To(HaveKeyWithValue("solo", "solo.io"))
 	})
 
 	It("should ignore bad labels", func() {
@@ -49,12 +49,12 @@ var _ = Describe("Downward", func() {
 
 	It("should retrieve annotations", func() {
 		data["annotations"] = []byte(`
-		kgateway="kgateway.dev"
+		solo="solo.io"
 
 		`)
 
 		res := RetrieveDownwardAPIFrom(reader, envreader)
-		Expect(res.PodAnnotations()).To(HaveKeyWithValue("kgateway", "kgateway.dev"))
+		Expect(res.PodAnnotations()).To(HaveKeyWithValue("solo", "solo.io"))
 	})
 
 	It("should env vars", func() {

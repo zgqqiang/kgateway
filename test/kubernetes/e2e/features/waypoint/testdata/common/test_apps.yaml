@@ -18,7 +18,7 @@ spec:
   serviceAccountName: curl
   containers:
     - name: curl
-      image: ghcr.io/kgateway-dev/curl:7.83.1
+      image: curlimages/curl:7.83.1
       imagePullPolicy: IfNotPresent
       command:
         - "tail"
@@ -50,7 +50,7 @@ spec:
   serviceAccountName: notcurl
   containers:
     - name: notcurl
-      image: ghcr.io/kgateway-dev/curl:7.83.1
+      image: curlimages/curl:7.83.1
       imagePullPolicy: IfNotPresent
       command:
         - "tail"
@@ -231,22 +231,3 @@ spec:
   workloadSelector:
     labels:
       app: svc-b
-
-##################################################################################################
-# istio allows writing a WorkloadEntry with a network but no address
-# we just include one here and expect it to do nothing
-# this acts as an assertion that we don't push invalid envoy and cause NACKs (due to invalid LbAddr)
-##################################################################################################
-# ---
-# TODO uncomment this to get e2e coverage on our filtering
-# currently it will break zTunnel until we get a new istio release to test against
-# https://github.com/istio/istio/issues/56531
-#
-# apiVersion: networking.istio.io/v1beta1
-# kind: WorkloadEntry
-# metadata:
-#   name: empty-addr-workloadentry
-#   labels:
-#     app: svc-b
-# spec:
-#   network: some-external-network

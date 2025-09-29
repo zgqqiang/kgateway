@@ -1,10 +1,9 @@
 package admin_test
 
 import (
-	"errors"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/rotisserie/eris"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -27,7 +26,7 @@ var _ = Describe("SnapshotResponseData", func() {
 		Entry("errored response can be formatted as json",
 			admin.SnapshotResponseData{
 				Data:  "",
-				Error: errors.New("one error"),
+				Error: eris.New("one error"),
 			},
 			"{\"data\":\"\",\"error\":\"one error\"}"),
 		Entry("CR list can be formatted as json",

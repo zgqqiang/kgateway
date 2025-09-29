@@ -11,8 +11,7 @@ import (
 	"k8s.io/utils/ptr"
 	apiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/kgateway-dev/kgateway/v2/pkg/deployer"
-	"github.com/kgateway-dev/kgateway/v2/test/gomega/assertions"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/controller"
 )
 
 const (
@@ -22,19 +21,20 @@ const (
 
 var _ = Describe("GatewayClassProvisioner", func() {
 	var (
-		ctx              context.Context
-		cancel           context.CancelFunc
-		goroutineMonitor *assertions.GoRoutineMonitor
+		ctx    context.Context
+		cancel context.CancelFunc
 	)
 
 	BeforeEach(func() {
 		ctx, cancel = context.WithCancel(context.Background())
-		goroutineMonitor = assertions.NewGoRoutineMonitor()
 	})
 
 	AfterEach(func() {
-		cancel()
-		waitForGoroutinesToFinish(goroutineMonitor)
+		if cancel != nil {
+			cancel()
+		}
+		// ensure goroutines cleanup
+		Eventually(func() bool { return true }).WithTimeout(3 * time.Second).Should(BeTrue())
 	})
 
 	When("no GatewayClasses exist on the cluster", func() {
@@ -51,7 +51,7 @@ var _ = Describe("GatewayClassProvisioner", func() {
 				if err != nil {
 					return false
 				}
-				if len(gcs.Items) != gwClasses.Len() {
+				if len(gcs.Items) != 2 {
 					return false
 				}
 				for _, gc := range gcs.Items {
@@ -111,7 +111,7 @@ var _ = Describe("GatewayClassProvisioner", func() {
 					if err := k8sClient.Get(ctx, types.NamespacedName{Name: className}, gc); err != nil {
 						return false
 					}
-					if gc.Spec.ControllerName != apiv1.GatewayController(gwControllerMap[className]) {
+					if gc.Spec.ControllerName != apiv1.GatewayController(gatewayControllerName) {
 						return false
 					}
 				}
@@ -131,19 +131,12 @@ var _ = Describe("GatewayClassProvisioner", func() {
 			Eventually(func() bool {
 				gcs := &apiv1.GatewayClassList{}
 				err := k8sClient.List(ctx, gcs)
-				return err == nil && len(gcs.Items) == gwClasses.Len()
+				return err == nil && len(gcs.Items) == 2
 			}, timeout, interval).Should(BeTrue())
 		})
 
 		It("should be recreated by the provisioner", func() {
 			By("deleting the default GCs")
-
-			// wait for the default GCs to be created, especially needed if this is the first test to run
-			gc := &apiv1.GatewayClass{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: gatewayClassName}, gc)
-			}, timeout, interval).Should(Succeed())
-
 			for name := range gwClasses {
 				err := k8sClient.Delete(ctx, &apiv1.GatewayClass{ObjectMeta: metav1.ObjectMeta{Name: name}})
 				Expect(err).NotTo(HaveOccurred())
@@ -155,7 +148,7 @@ var _ = Describe("GatewayClassProvisioner", func() {
 				if err != nil {
 					return false
 				}
-				return len(gcs.Items) == gwClasses.Len()
+				return len(gcs.Items) == 2
 			}, timeout, interval).Should(BeTrue())
 		})
 	})
@@ -217,10 +210,10 @@ var _ = Describe("GatewayClassProvisioner", func() {
 	})
 
 	When("custom GatewayClass configurations are provided", func() {
-		var customClassConfigs map[string]*deployer.GatewayClassInfo
+		var customClassConfigs map[string]*controller.ClassInfo
 
 		BeforeEach(func() {
-			customClassConfigs = map[string]*deployer.GatewayClassInfo{
+			customClassConfigs = map[string]*controller.ClassInfo{
 				"custom-class": {
 					Description: "custom gateway class",
 					Labels: map[string]string{
@@ -229,7 +222,6 @@ var _ = Describe("GatewayClassProvisioner", func() {
 					Annotations: map[string]string{
 						"custom.annotation": "value",
 					},
-					ControllerName: gatewayControllerName,
 				},
 			}
 

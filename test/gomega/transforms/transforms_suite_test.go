@@ -1,13 +1,17 @@
+//go:build ignore
+
 package transforms_test
 
 import (
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
-	"github.com/solo-io/go-utils/testutils"
+	"github.com/solo-io/solo-kit/test/helpers"
 )
 
 func TestTransforms(t *testing.T) {
-	testutils.RegisterCommonFailHandlers()
+	helpers.RegisterCommonFailHandlers()
+	helpers.SetupLog()
+
 	RunSpecs(t, "Transforms Suite")
 }

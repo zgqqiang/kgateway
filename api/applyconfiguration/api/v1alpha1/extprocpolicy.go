@@ -3,15 +3,15 @@
 package v1alpha1
 
 import (
-	apiv1alpha1 "github.com/kgateway-dev/kgateway/v2/api/v1alpha1"
+	v1 "k8s.io/api/core/v1"
 )
 
 // ExtProcPolicyApplyConfiguration represents a declarative configuration of the ExtProcPolicy type for use
 // with apply.
 type ExtProcPolicyApplyConfiguration struct {
-	ExtensionRef   *NamespacedObjectReferenceApplyConfiguration `json:"extensionRef,omitempty"`
-	ProcessingMode *ProcessingModeApplyConfiguration            `json:"processingMode,omitempty"`
-	Disable        *apiv1alpha1.PolicyDisable                   `json:"disable,omitempty"`
+	ExtensionRef     *v1.LocalObjectReference          `json:"extensionRef,omitempty"`
+	ProcessingMode   *ProcessingModeApplyConfiguration `json:"processingMode,omitempty"`
+	FailureModeAllow *bool                             `json:"failureModeAllow,omitempty"`
 }
 
 // ExtProcPolicyApplyConfiguration constructs a declarative configuration of the ExtProcPolicy type for use with
@@ -23,8 +23,8 @@ func ExtProcPolicy() *ExtProcPolicyApplyConfiguration {
 // WithExtensionRef sets the ExtensionRef field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the ExtensionRef field is set to the value of the last call.
-func (b *ExtProcPolicyApplyConfiguration) WithExtensionRef(value *NamespacedObjectReferenceApplyConfiguration) *ExtProcPolicyApplyConfiguration {
-	b.ExtensionRef = value
+func (b *ExtProcPolicyApplyConfiguration) WithExtensionRef(value v1.LocalObjectReference) *ExtProcPolicyApplyConfiguration {
+	b.ExtensionRef = &value
 	return b
 }
 
@@ -36,10 +36,10 @@ func (b *ExtProcPolicyApplyConfiguration) WithProcessingMode(value *ProcessingMo
 	return b
 }
 
-// WithDisable sets the Disable field in the declarative configuration to the given value
+// WithFailureModeAllow sets the FailureModeAllow field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the Disable field is set to the value of the last call.
-func (b *ExtProcPolicyApplyConfiguration) WithDisable(value apiv1alpha1.PolicyDisable) *ExtProcPolicyApplyConfiguration {
-	b.Disable = &value
+// If called multiple times, the FailureModeAllow field is set to the value of the last call.
+func (b *ExtProcPolicyApplyConfiguration) WithFailureModeAllow(value bool) *ExtProcPolicyApplyConfiguration {
+	b.FailureModeAllow = &value
 	return b
 }

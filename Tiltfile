@@ -217,8 +217,8 @@ def install_kgateway():
         )
 
         cmd_button(
-            name="install-kgateway",
-            text="Install / Upgrade Kgateway",
+            name="install-edge",
+            text="Install / Upgrade Edge",
             resource=settings.get("helm_installation_name"),
             # location=location.NAV,
             argv = ["sh", "-c", install_helm_cmd],

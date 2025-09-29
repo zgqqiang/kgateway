@@ -3,16 +3,23 @@
 package v1alpha1
 
 import (
+	v1 "k8s.io/api/core/v1"
+
 	apiv1alpha1 "github.com/kgateway-dev/kgateway/v2/api/v1alpha1"
 )
 
 // ExtAuthPolicyApplyConfiguration represents a declarative configuration of the ExtAuthPolicy type for use
 // with apply.
 type ExtAuthPolicyApplyConfiguration struct {
-	ExtensionRef      *NamespacedObjectReferenceApplyConfiguration `json:"extensionRef,omitempty"`
-	WithRequestBody   *ExtAuthBufferSettingsApplyConfiguration     `json:"withRequestBody,omitempty"`
-	ContextExtensions map[string]string                            `json:"contextExtensions,omitempty"`
-	Disable           *apiv1alpha1.PolicyDisable                   `json:"disable,omitempty"`
+	ExtensionRef              *v1.LocalObjectReference          `json:"extensionRef,omitempty"`
+	Enablement                *apiv1alpha1.ExtAuthEnabled       `json:"enablement,omitempty"`
+	FailureModeAllow          *bool                             `json:"failureModeAllow,omitempty"`
+	WithRequestBody           *BufferSettingsApplyConfiguration `json:"withRequestBody,omitempty"`
+	ClearRouteCache           *bool                             `json:"clearRouteCache,omitempty"`
+	MetadataContextNamespaces []string                          `json:"metadataContextNamespaces,omitempty"`
+	IncludePeerCertificate    *bool                             `json:"includePeerCertificate,omitempty"`
+	IncludeTLSSession         *bool                             `json:"includeTLSSession,omitempty"`
+	EmitFilterStateStats      *bool                             `json:"emitFilterStateStats,omitempty"`
 }
 
 // ExtAuthPolicyApplyConfiguration constructs a declarative configuration of the ExtAuthPolicy type for use with
@@ -24,37 +31,73 @@ func ExtAuthPolicy() *ExtAuthPolicyApplyConfiguration {
 // WithExtensionRef sets the ExtensionRef field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the ExtensionRef field is set to the value of the last call.
-func (b *ExtAuthPolicyApplyConfiguration) WithExtensionRef(value *NamespacedObjectReferenceApplyConfiguration) *ExtAuthPolicyApplyConfiguration {
-	b.ExtensionRef = value
+func (b *ExtAuthPolicyApplyConfiguration) WithExtensionRef(value v1.LocalObjectReference) *ExtAuthPolicyApplyConfiguration {
+	b.ExtensionRef = &value
+	return b
+}
+
+// WithEnablement sets the Enablement field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the Enablement field is set to the value of the last call.
+func (b *ExtAuthPolicyApplyConfiguration) WithEnablement(value apiv1alpha1.ExtAuthEnabled) *ExtAuthPolicyApplyConfiguration {
+	b.Enablement = &value
+	return b
+}
+
+// WithFailureModeAllow sets the FailureModeAllow field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the FailureModeAllow field is set to the value of the last call.
+func (b *ExtAuthPolicyApplyConfiguration) WithFailureModeAllow(value bool) *ExtAuthPolicyApplyConfiguration {
+	b.FailureModeAllow = &value
 	return b
 }
 
 // WithWithRequestBody sets the WithRequestBody field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the WithRequestBody field is set to the value of the last call.
-func (b *ExtAuthPolicyApplyConfiguration) WithWithRequestBody(value *ExtAuthBufferSettingsApplyConfiguration) *ExtAuthPolicyApplyConfiguration {
+func (b *ExtAuthPolicyApplyConfiguration) WithWithRequestBody(value *BufferSettingsApplyConfiguration) *ExtAuthPolicyApplyConfiguration {
 	b.WithRequestBody = value
 	return b
 }
 
-// WithContextExtensions puts the entries into the ContextExtensions field in the declarative configuration
+// WithClearRouteCache sets the ClearRouteCache field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ClearRouteCache field is set to the value of the last call.
+func (b *ExtAuthPolicyApplyConfiguration) WithClearRouteCache(value bool) *ExtAuthPolicyApplyConfiguration {
+	b.ClearRouteCache = &value
+	return b
+}
+
+// WithMetadataContextNamespaces adds the given value to the MetadataContextNamespaces field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
-// If called multiple times, the entries provided by each call will be put on the ContextExtensions field,
-// overwriting an existing map entries in ContextExtensions field with the same key.
-func (b *ExtAuthPolicyApplyConfiguration) WithContextExtensions(entries map[string]string) *ExtAuthPolicyApplyConfiguration {
-	if b.ContextExtensions == nil && len(entries) > 0 {
-		b.ContextExtensions = make(map[string]string, len(entries))
-	}
-	for k, v := range entries {
-		b.ContextExtensions[k] = v
+// If called multiple times, values provided by each call will be appended to the MetadataContextNamespaces field.
+func (b *ExtAuthPolicyApplyConfiguration) WithMetadataContextNamespaces(values ...string) *ExtAuthPolicyApplyConfiguration {
+	for i := range values {
+		b.MetadataContextNamespaces = append(b.MetadataContextNamespaces, values[i])
 	}
 	return b
 }
 
-// WithDisable sets the Disable field in the declarative configuration to the given value
+// WithIncludePeerCertificate sets the IncludePeerCertificate field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the Disable field is set to the value of the last call.
-func (b *ExtAuthPolicyApplyConfiguration) WithDisable(value apiv1alpha1.PolicyDisable) *ExtAuthPolicyApplyConfiguration {
-	b.Disable = &value
+// If called multiple times, the IncludePeerCertificate field is set to the value of the last call.
+func (b *ExtAuthPolicyApplyConfiguration) WithIncludePeerCertificate(value bool) *ExtAuthPolicyApplyConfiguration {
+	b.IncludePeerCertificate = &value
+	return b
+}
+
+// WithIncludeTLSSession sets the IncludeTLSSession field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the IncludeTLSSession field is set to the value of the last call.
+func (b *ExtAuthPolicyApplyConfiguration) WithIncludeTLSSession(value bool) *ExtAuthPolicyApplyConfiguration {
+	b.IncludeTLSSession = &value
+	return b
+}
+
+// WithEmitFilterStateStats sets the EmitFilterStateStats field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the EmitFilterStateStats field is set to the value of the last call.
+func (b *ExtAuthPolicyApplyConfiguration) WithEmitFilterStateStats(value bool) *ExtAuthPolicyApplyConfiguration {
+	b.EmitFilterStateStats = &value
 	return b
 }

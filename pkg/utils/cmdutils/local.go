@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/pkg/errors"
 	"github.com/solo-io/go-utils/threadsafe"
 )
 
@@ -90,7 +91,7 @@ func (cmd *LocalCmd) Run() *RunError {
 			command:    cmd.Args,
 			output:     combinedOutput.Bytes(),
 			inner:      err,
-			stackTrace: err,
+			stackTrace: errors.WithStack(err),
 		}
 	}
 	return nil
@@ -107,7 +108,7 @@ func (cmd *LocalCmd) Start() *RunError {
 			command:    cmd.Args,
 			output:     cmd.combinedOutput.Bytes(),
 			inner:      err,
-			stackTrace: err,
+			stackTrace: errors.WithStack(err),
 		}
 	}
 	return nil
@@ -121,7 +122,7 @@ func (cmd *LocalCmd) Wait() *RunError {
 			command:    cmd.Args,
 			output:     cmd.combinedOutput.Bytes(),
 			inner:      err,
-			stackTrace: err,
+			stackTrace: errors.WithStack(err),
 		}
 	}
 	return nil
@@ -131,8 +132,4 @@ func (cmd *LocalCmd) Wait() *RunError {
 // If the returned error is non-nil, it should be of type *RunError
 func (cmd *LocalCmd) Output() []byte {
 	return cmd.combinedOutput.Bytes()
-}
-
-func (cmd *LocalCmd) PrettyCommand() string {
-	return PrettyCommand(cmd.Args[0], cmd.Args[1:]...)
 }

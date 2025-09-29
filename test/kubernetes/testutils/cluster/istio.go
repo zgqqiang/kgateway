@@ -2,15 +2,15 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+
+	"github.com/rotisserie/eris"
+	"github.com/solo-io/go-utils/contextutils"
 
 	glooruntime "github.com/kgateway-dev/kgateway/v2/test/kubernetes/testutils/runtime"
 	"github.com/kgateway-dev/kgateway/v2/test/testutils"
@@ -27,7 +27,7 @@ func GetIstioctl(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to download istio: %w", err)
 	}
-	slog.Info("using Istio binary", "path", istioctlBinary)
+	contextutils.LoggerFrom(ctx).Infof("Using Istio binary '%s'", istioctlBinary)
 
 	return istioctlBinary, nil
 }
@@ -39,7 +39,7 @@ func InstallMinimalIstio(
 	operatorFileContent := generateIstioOperatorFileContent("", minimalProfile)
 	operatorFile := filepath.Join(os.TempDir(), "istio-operator.yaml")
 
-	err := os.WriteFile(operatorFile, []byte(operatorFileContent), 0o600)
+	err := os.WriteFile(operatorFile, []byte(operatorFileContent), 0o644)
 	if err != nil {
 		return fmt.Errorf("failed to write operator file: %w", err)
 	}
@@ -55,7 +55,7 @@ func InstallRevisionedIstio(
 	operatorFileContent := generateIstioOperatorFileContent(revision, profile)
 	operatorFile := filepath.Join(os.TempDir(), "istio-operator.yaml")
 
-	err := os.WriteFile(operatorFile, []byte(operatorFileContent), 0o600)
+	err := os.WriteFile(operatorFile, []byte(operatorFileContent), 0o644)
 	if err != nil {
 		return fmt.Errorf("failed to write operator file: %w", err)
 	}
@@ -118,13 +118,13 @@ func getIstioVersion() string {
 // Download istioctl binary from istio.io/downloadIstio and returns the path to the binary
 func downloadIstio(ctx context.Context, version string) (string, error) {
 	if version == "" {
-		slog.Info("ISTIO_VERSION not specified, using istioctl from PATH")
+		contextutils.LoggerFrom(ctx).Infof("ISTIO_VERSION not specified, using istioctl from PATH")
 		binaryPath, err := exec.LookPath("istioctl")
 		if err != nil {
-			return "", errors.New("ISTIO_VERSION environment variable must be specified or istioctl must be installed")
+			return "", eris.New("ISTIO_VERSION environment variable must be specified or istioctl must be installed")
 		}
 
-		slog.Info("using istioctl", "path", binaryPath)
+		contextutils.LoggerFrom(ctx).Infof("using istioctl path: %s", binaryPath)
 
 		return binaryPath, nil
 	}
@@ -137,7 +137,7 @@ func downloadIstio(ctx context.Context, version string) (string, error) {
 		return binaryLocation, nil
 	}
 	if err := os.MkdirAll(binaryDir, 0o755); err != nil {
-		return "", fmt.Errorf("create directory: %w", err)
+		return "", eris.Wrap(err, "create directory")
 	}
 
 	if istioctlDownloadFrom := os.Getenv("ISTIOCTL_DOWNLOAD_FROM"); istioctlDownloadFrom != "" {
@@ -156,13 +156,13 @@ func downloadIstio(ctx context.Context, version string) (string, error) {
 		url := fmt.Sprintf("%s/%s/istioctl-%s-%s%s.tar.gz", istioctlDownloadFrom, version, version, osName, archModifier)
 
 		// Use curl and tar to download and extract the file
-		cmd := exec.Command("sh", "-c", fmt.Sprintf("curl -sSL %s | tar -xz -C %s", url, binaryDir)) //nolint:gosec // G204: controlled download command for istioctl binary in tests
+		cmd := exec.Command("sh", "-c", fmt.Sprintf("curl -sSL %s | tar -xz -C %s", url, binaryDir))
 		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("download and extract istioctl, cmd: %s: %w", cmd.Args, err)
+			return "", eris.Wrapf(err, "download and extract istioctl, cmd: %s", cmd.Args)
 		}
 		// Change permissions
 		if err := os.Chmod(binaryLocation, 0o755); err != nil {
-			return "", fmt.Errorf("change permissions: %w", err)
+			return "", eris.Wrap(err, "change permissions")
 		}
 		return binaryLocation, nil
 	}
@@ -196,7 +196,7 @@ func downloadIstio(ctx context.Context, version string) (string, error) {
 
 func UninstallIstio(istioctlBinary, kubeContext string) error {
 	// sh -c yes | istioctl uninstall —purge —context <kube-context>
-	cmd := exec.Command("sh", "-c", fmt.Sprintf("yes | %s uninstall --purge --context %s", istioctlBinary, kubeContext)) //nolint:gosec // G204: controlled istioctl uninstall command in tests
+	cmd := exec.Command("sh", "-c", fmt.Sprintf("yes | %s uninstall --purge --context %s", istioctlBinary, kubeContext))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -209,7 +209,7 @@ func UninstallIstio(istioctlBinary, kubeContext string) error {
 func CreateIstioBugReport(ctx context.Context, istioctlBinary, kubeContext, artifactOutputDir string) {
 	// Generate istioctl bug report
 	if istioctlBinary == "" {
-		log.Fatal("istioctl binary not set. Cannot generate istioctl bug report.")
+		contextutils.LoggerFrom(ctx).Panic("istioctl binary not set. Cannot generate istioctl bug report.")
 	}
 
 	bugReportCmd := exec.Command(istioctlBinary, "bug-report", "--full-secrets", "--context", kubeContext)

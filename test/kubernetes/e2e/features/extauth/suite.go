@@ -15,6 +15,7 @@ import (
 	"github.com/kgateway-dev/kgateway/v2/pkg/utils/requestutils/curl"
 	testmatchers "github.com/kgateway-dev/kgateway/v2/test/gomega/matchers"
 	"github.com/kgateway-dev/kgateway/v2/test/kubernetes/e2e"
+	"github.com/kgateway-dev/kgateway/v2/test/kubernetes/e2e/defaults"
 	testdefaults "github.com/kgateway-dev/kgateway/v2/test/kubernetes/e2e/defaults"
 )
 
@@ -57,7 +58,7 @@ func (s *testingSuite) SetupSuite() {
 		// resources from curl manifest
 		testdefaults.CurlPod,
 		// resources from service manifest
-		basicSecureRoute, simpleSvc, simpleDeployment,
+		simpleSvc, simpleDeployment,
 		// deployer-generated resources
 		proxyDeployment, proxyService,
 		// extauth resources
@@ -72,8 +73,8 @@ func (s *testingSuite) SetupSuite() {
 	s.testInstallation.Assertions.EventuallyObjectsExist(s.ctx, s.commonResources...)
 
 	// make sure pods are running
-	s.testInstallation.Assertions.EventuallyPodsRunning(s.ctx, testdefaults.CurlPod.GetNamespace(), metav1.ListOptions{
-		LabelSelector: testdefaults.CurlPodLabelSelector,
+	s.testInstallation.Assertions.EventuallyPodsRunning(s.ctx, defaults.CurlPod.GetNamespace(), metav1.ListOptions{
+		LabelSelector: defaults.CurlPodLabelSelector,
 	})
 
 	s.testInstallation.Assertions.EventuallyPodsRunning(s.ctx, proxyObjMeta.GetNamespace(), metav1.ListOptions{
@@ -95,7 +96,7 @@ func (s *testingSuite) TearDownSuite() {
 }
 
 // TestExtAuthPolicy tests the basic ExtAuth functionality with header-based allow/deny
-// Checks for gateway level auth with route level opt out
+// Checks for gateay level auth with route level opt out
 func (s *testingSuite) TestExtAuthPolicy() {
 	manifests := []string{
 		securedGatewayPolicyManifest,
@@ -187,15 +188,16 @@ func (s *testingSuite) TestExtAuthPolicy() {
 	}
 }
 
-// TestRouteTargetedExtAuthPolicy tests route level only extauth
-func (s *testingSuite) TestRouteTargetedExtAuthPolicy() {
+// TextRouteTargetedExtAuthPolicy tests route level only extauth
+func (s *testingSuite) TextRouteTargetedExtAuthPolicy() {
 	manifests := []string{
 		securedRouteManifest,
+		secureAndDisableAllManifest,
 		insecureRouteManifest,
 	}
 
 	resources := []client.Object{
-		secureRoute, secureTrafficPolicy,
+		basicSecureRoute,
 		insecureRoute, insecureTrafficPolicy,
 	}
 	s.T().Cleanup(func() {
@@ -234,17 +236,22 @@ func (s *testingSuite) TestRouteTargetedExtAuthPolicy() {
 			expectedStatus: http.StatusOK,
 		},
 		{
+			name:           "request allowed on reinsecured route",
+			hostname:       "disableall.com",
+			expectedStatus: http.StatusOK,
+		},
+		{
 			name: "request allowed with allow header on secured route",
 			headers: map[string]string{
 				"x-ext-authz": "allow",
 			},
-			hostname:                     "secureroute.com",
+			hostname:                     "securedroute.com",
 			expectedStatus:               http.StatusOK,
 			expectedUpstreamBodyContents: "X-Ext-Authz-Check-Result",
 		},
 		{
 			name:           "request denied without header on secured route",
-			hostname:       "secureroute.com",
+			hostname:       "securedroute.com",
 			headers:        map[string]string{},
 			expectedStatus: http.StatusForbidden,
 		},

@@ -1,29 +1,77 @@
 package proxy_syncer
 
 import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
-	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
+	"maps"
+	"slices"
 
-	"github.com/kgateway-dev/kgateway/v2/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	plug "github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/plugin"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
-	reportssdk "github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/reporter"
-	"github.com/kgateway-dev/kgateway/v2/pkg/reports"
 )
+
+type attachmentReport struct {
+	Errors   []error
+	Ancestor ir.ObjectSource
+}
+
+// policyObjsWithReports maps from a policy object to a list of ancestors it was attached to
+// and the associated errors/conditions from the attachment/IR translation, if any
+type policyObjsWithReports map[ir.AttachedPolicyRef][]attachmentReport
+
+type GKPolicyReport struct {
+	// SeenPolicies maps from schema.GroupKind.String() to a PolicyReport for
+	// all encountered policies of that GroupKind
+	SeenPolicies map[string]plug.PolicyReport
+}
 
 type ObjWithAttachedPolicies interface {
 	GetAttachedPolicies() ir.AttachedPolicies
 	GetObjectSource() ir.ObjectSource
 }
 
+func convertBackends(backends []ir.BackendObjectIR) []ObjWithAttachedPolicies {
+	objs := make([]ObjWithAttachedPolicies, 0, len(backends))
+	for _, backend := range backends {
+		objs = append(objs, backend)
+	}
+	return objs
+}
+
 var _ ObjWithAttachedPolicies = ir.BackendObjectIR{}
 
-// GenerateBackendPolicyReport generates a report map for all policies attached to the given backends.
-// Exported for testing.
-func GenerateBackendPolicyReport(in []*ir.BackendObjectIR) reports.ReportMap {
-	merged := reports.NewReportMap()
-	reporter := reports.NewReporter(&merged)
+func (r GKPolicyReport) ResourceName() string {
+	return "GKPolicyReport"
+}
 
+func comparePolicyErrors(i, j []error) bool {
+	if !slices.Equal(i, j) {
+		return false
+	}
+	return true
+}
+func comparePolicyWithAncestorReports(x, y plug.AncestorReports) bool {
+	if !maps.EqualFunc(x, y, comparePolicyErrors) {
+		return false
+	}
+	return true
+}
+
+func (r GKPolicyReport) Equals(in GKPolicyReport) bool {
+	for gk, reports := range r.SeenPolicies {
+		inreports, ok := in.SeenPolicies[gk]
+		if !ok {
+			return false
+		}
+		if !maps.EqualFunc(reports, inreports, comparePolicyWithAncestorReports) {
+			return false
+		}
+	}
+	return true
+}
+
+func generatePolicyReport(in []ObjWithAttachedPolicies) *GKPolicyReport {
+	seenPolicyResources := policyObjsWithReports{}
 	// iterate all backends and aggregate all policies attached to them
 	// we track each attachment point of the policy to be tracked as an
 	// ancestor for reporting status
@@ -35,45 +83,46 @@ func GenerateBackendPolicyReport(in []*ir.BackendObjectIR) reports.ReportMap {
 					// since there's no real policy object, we don't need to generate status for it
 					continue
 				}
-
-				key := reportssdk.PolicyKey{
-					Group:     polAtt.PolicyRef.Group,
-					Kind:      polAtt.PolicyRef.Kind,
-					Namespace: polAtt.PolicyRef.Namespace,
-					Name:      polAtt.PolicyRef.Name,
+				ar := attachmentReport{
+					Ancestor: obj.GetObjectSource(),
+					Errors:   polAtt.Errors,
 				}
-				ancestorRef := gwv1.ParentReference{
-					Group:     ptr.To(gwv1.Group(obj.GetObjectSource().Group)),
-					Kind:      ptr.To(gwv1.Kind(obj.GetObjectSource().Kind)),
-					Namespace: ptr.To(gwv1.Namespace(obj.GetObjectSource().Namespace)),
-					Name:      gwv1.ObjectName(obj.GetObjectSource().Name),
-				}
-				r := reporter.Policy(key, polAtt.Generation).AncestorRef(ancestorRef)
-				if len(polAtt.Errors) > 0 {
-					r.SetCondition(reportssdk.PolicyCondition{
-						Type:    string(v1alpha1.PolicyConditionAccepted),
-						Status:  metav1.ConditionFalse,
-						Reason:  string(v1alpha1.PolicyReasonInvalid),
-						Message: polAtt.FormatErrors(),
-					})
-					continue
-				}
-
-				r.SetCondition(reportssdk.PolicyCondition{
-					Type:    string(v1alpha1.PolicyConditionAccepted),
-					Status:  metav1.ConditionTrue,
-					Reason:  string(v1alpha1.PolicyReasonValid),
-					Message: reportssdk.PolicyAcceptedMsg,
-				})
-				r.SetCondition(reportssdk.PolicyCondition{
-					Type:    string(v1alpha1.PolicyConditionAttached),
-					Status:  metav1.ConditionTrue,
-					Reason:  string(v1alpha1.PolicyReasonAttached),
-					Message: reportssdk.PolicyAttachedMsg,
-				})
+				reports := seenPolicyResources[*polAtt.PolicyRef]
+				reports = append(reports, ar)
+				seenPolicyResources[*polAtt.PolicyRef] = reports
 			}
 		}
 	}
 
-	return merged
+	// now generate a map keyed by each policy object we saw during attachment
+	// and store the full set of ancestors/attachments associated with it
+	policiesToAncestorReports := plug.PolicyReport{}
+	for policyRef, reports := range seenPolicyResources {
+		ancestorReports := map[ir.ObjectSource][]error{}
+		for _, rpt := range reports {
+			ancestorReports[rpt.Ancestor] = rpt.Errors
+		}
+		policiesToAncestorReports[policyRef] = ancestorReports
+	}
+
+	// finally, we group each policy obj with their associated reports
+	// by GroupKind; this allows us to give each plugin a chance to process
+	// policy reports for its own GroupKind
+	seenPolsByGk := map[string]plug.PolicyReport{}
+	for policyRef, reports := range policiesToAncestorReports {
+		gk := schema.GroupKind{
+			Group: policyRef.Group,
+			Kind:  policyRef.Kind,
+		}
+		gkStr := gk.String()
+		gkPolsMap := seenPolsByGk[gkStr]
+		if gkPolsMap == nil {
+			gkPolsMap = map[ir.AttachedPolicyRef]plug.AncestorReports{}
+		}
+		gkPolsMap[policyRef] = reports
+		seenPolsByGk[gkStr] = gkPolsMap
+	}
+	return &GKPolicyReport{
+		SeenPolicies: seenPolsByGk,
+	}
 }

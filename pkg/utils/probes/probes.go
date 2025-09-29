@@ -3,10 +3,11 @@ package probes
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/solo-io/go-utils/contextutils"
 )
 
 type ServerParams struct {
@@ -50,18 +51,15 @@ func StartServer(ctx context.Context, params ServerParams) {
 			w.Write([]byte(params.ResponseBody))
 		})
 		server = &http.Server{
-			Addr:              fmt.Sprintf(":%d", params.Port),
-			Handler:           mux,
-			ReadHeaderTimeout: time.Second * 10,
-			ReadTimeout:       time.Second * 15,
-			WriteTimeout:      time.Second * 15,
+			Addr:    fmt.Sprintf(":%d", params.Port),
+			Handler: mux,
 		}
-		slog.Info("probe server starting", "addr", server.Addr, "path", params.Path)
+		contextutils.LoggerFrom(ctx).Infof("probe server starting at %s listening for %s", server.Addr, params.Path)
 		err := server.ListenAndServe()
 		if err == http.ErrServerClosed {
-			slog.Info("probe server closed")
+			contextutils.LoggerFrom(ctx).Info("probe server closed")
 		} else {
-			slog.Warn("probe server closed with unexpected error", "error", err)
+			contextutils.LoggerFrom(ctx).Warnf("probe server closed with unexpected error: %v", err)
 		}
 	}()
 
@@ -72,7 +70,7 @@ func StartServer(ctx context.Context, params ServerParams) {
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer shutdownCancel()
 			if err := server.Shutdown(shutdownCtx); err != nil {
-				slog.Warn("probe server shutdown returned error", "error", err)
+				contextutils.LoggerFrom(shutdownCtx).Warnf("probe server shutdown returned error: %v", err)
 			}
 		}
 	}()

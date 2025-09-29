@@ -1,25 +1,3 @@
-Clusters:
-- connectTimeout: 5s
-  edsClusterConfig:
-    edsConfig:
-      ads: {}
-      resourceApiVersion: V3
-  ignoreHealthOnHostRemoval: true
-  metadata: {}
-  name: kube_default_example-tcp-svc-1_8080
-  type: EDS
-- connectTimeout: 5s
-  edsClusterConfig:
-    edsConfig:
-      ads: {}
-      resourceApiVersion: V3
-  ignoreHealthOnHostRemoval: true
-  metadata: {}
-  name: kube_default_example-tcp-svc-2_8081
-  type: EDS
-- connectTimeout: 5s
-  metadata: {}
-  name: test-backend-plugin_default_example-svc_80
 Listeners:
 - address:
     socketAddress:
@@ -31,77 +9,12 @@ Listeners:
     - name: envoy.filters.network.tcp_proxy
       typedConfig:
         '@type': type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
-        statPrefix: listener~8080-default.example-tcp-route-rule-0
+        statPrefix: default.example-tcp-route-rule-0
         weightedClusters:
           clusters:
           - name: kube_default_example-tcp-svc-1_8080
             weight: 65
           - name: kube_default_example-tcp-svc-2_8081
             weight: 35
-    name: listener~8080-default.example-tcp-route-rule-0
-  name: listener~8080
-Statuses:
-  gateways:
-    default/example-tcp-gateway:
-      conditions:
-      - lastTransitionTime: null
-        message: ""
-        reason: ListenerSetsNotAllowed
-        status: Unknown
-        type: AttachedListenerSets
-      - lastTransitionTime: null
-        message: Gateway is accepted
-        reason: Accepted
-        status: "True"
-        type: Accepted
-      - lastTransitionTime: null
-        message: Gateway is programmed
-        reason: Programmed
-        status: "True"
-        type: Programmed
-      listeners:
-      - attachedRoutes: 1
-        conditions:
-        - lastTransitionTime: null
-          message: Listener is accepted
-          reason: Accepted
-          status: "True"
-          type: Accepted
-        - lastTransitionTime: null
-          message: Listener does not have conflicts
-          reason: NoConflicts
-          status: "False"
-          type: Conflicted
-        - lastTransitionTime: null
-          message: Listener has valid refs
-          reason: ResolvedRefs
-          status: "True"
-          type: ResolvedRefs
-        - lastTransitionTime: null
-          message: Listener is programmed
-          reason: Programmed
-          status: "True"
-          type: Programmed
-        name: tcp
-        supportedKinds:
-        - group: gateway.networking.k8s.io
-          kind: TCPRoute
-  tcpRoutes:
-    default/example-tcp-route:
-      parents:
-      - conditions:
-        - lastTransitionTime: null
-          message: ""
-          reason: Accepted
-          status: "True"
-          type: Accepted
-        - lastTransitionTime: null
-          message: Route has valid refs
-          reason: ResolvedRefs
-          status: "True"
-          type: ResolvedRefs
-        controllerName: kgateway
-        parentRef:
-          group: ""
-          kind: ""
-          name: example-tcp-gateway
+    name: default.example-tcp-route-rule-0
+  name: tcp

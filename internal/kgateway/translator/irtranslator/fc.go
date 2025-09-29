@@ -5,24 +5,30 @@ import (
 	"fmt"
 	"sort"
 
-	envoycorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	envoylistenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	"google.golang.org/protobuf/types/known/anypb"
+
+	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	envoy_config_listener_v3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	luav3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/lua/v3"
 	routerv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
 	envoyhttp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	envoytcp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
-	envoytlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	envoyauth "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	envoy_tls_inspector "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/tls_inspector/v3"
+	"github.com/solo-io/go-utils/contextutils"
 	"google.golang.org/protobuf/proto"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/plugins"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/reports"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/utils"
-	sdkreporter "github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/reporter"
 )
 
 const (
@@ -34,16 +40,15 @@ type filterChainTranslator struct {
 	listener        ir.ListenerIR
 	gateway         ir.GatewayIR
 	routeConfigName string
-	reporter        sdkreporter.Reporter
 
-	pluginPass TranslationPassPlugins
+	PluginPass TranslationPassPlugins
 }
 
-func computeListenerAddress(bindAddress string, port uint32, reporter sdkreporter.GatewayReporter) *envoycorev3.Address {
+func computeListenerAddress(bindAddress string, port uint32, reporter reports.GatewayReporter) *envoy_config_core_v3.Address {
 	_, isIpv4Address, err := utils.IsIpv4Address(bindAddress)
 	if err != nil {
 		// TODO: return error ????
-		reporter.SetCondition(sdkreporter.GatewayCondition{
+		reporter.SetCondition(reports.GatewayCondition{
 			Type:    gwv1.GatewayConditionProgrammed,
 			Reason:  gwv1.GatewayReasonInvalid,
 			Status:  metav1.ConditionFalse,
@@ -51,12 +56,12 @@ func computeListenerAddress(bindAddress string, port uint32, reporter sdkreporte
 		})
 	}
 
-	return &envoycorev3.Address{
-		Address: &envoycorev3.Address_SocketAddress{
-			SocketAddress: &envoycorev3.SocketAddress{
-				Protocol: envoycorev3.SocketAddress_TCP,
+	return &envoy_config_core_v3.Address{
+		Address: &envoy_config_core_v3.Address_SocketAddress{
+			SocketAddress: &envoy_config_core_v3.SocketAddress{
+				Protocol: envoy_config_core_v3.SocketAddress_TCP,
 				Address:  bindAddress,
-				PortSpecifier: &envoycorev3.SocketAddress_PortValue{
+				PortSpecifier: &envoy_config_core_v3.SocketAddress_PortValue{
 					PortValue: port,
 				},
 				// As of Envoy 1.22: https://www.envoyproxy.io/docs/envoy/latest/version_history/v1.22/v1.22.0.html
@@ -68,24 +73,24 @@ func computeListenerAddress(bindAddress string, port uint32, reporter sdkreporte
 	}
 }
 
-func tlsInspectorFilter() *envoylistenerv3.ListenerFilter {
+func tlsInspectorFilter() *envoy_config_listener_v3.ListenerFilter {
 	configEnvoy := &envoy_tls_inspector.TlsInspector{}
 	msg, _ := utils.MessageToAny(configEnvoy)
-	return &envoylistenerv3.ListenerFilter{
+	return &envoy_config_listener_v3.ListenerFilter{
 		Name: wellknown.TlsInspector,
-		ConfigType: &envoylistenerv3.ListenerFilter_TypedConfig{
+		ConfigType: &envoy_config_listener_v3.ListenerFilter_TypedConfig{
 			TypedConfig: msg,
 		},
 	}
 }
 
-func (h *filterChainTranslator) initFilterChain(fcc ir.FilterChainCommon) *envoylistenerv3.FilterChain {
+func (h *filterChainTranslator) initFilterChain(ctx context.Context, fcc ir.FilterChainCommon, reporter reports.ListenerReporter) *envoy_config_listener_v3.FilterChain {
 	info := &FilterChainInfo{
 		Match: fcc.Matcher,
 		TLS:   fcc.TLS,
 	}
 
-	fc := &envoylistenerv3.FilterChain{
+	fc := &envoy_config_listener_v3.FilterChain{
 		Name:             fcc.FilterChainName,
 		FilterChainMatch: info.toMatch(),
 		TransportSocket:  info.toTransportSocket(),
@@ -94,11 +99,13 @@ func (h *filterChainTranslator) initFilterChain(fcc ir.FilterChainCommon) *envoy
 	return fc
 }
 
-func (h *filterChainTranslator) computeHttpFilters(ctx context.Context, l ir.HttpFilterChainIR, reporter sdkreporter.ListenerReporter) []*envoylistenerv3.Filter {
+func (h *filterChainTranslator) computeHttpFilters(ctx context.Context, l ir.HttpFilterChainIR, reporter reports.ListenerReporter) []*envoy_config_listener_v3.Filter {
+	log := contextutils.LoggerFrom(ctx).Desugar()
+
 	// 1. Generate all the network filters (including the HttpConnectionManager)
 	networkFilters, err := h.computeNetworkFiltersForHttp(ctx, l, reporter)
 	if err != nil {
-		logger.Error("error computing network filters", "error", err)
+		log.DPanic("error computing network filters", zap.Error(err))
 		// TODO: report? return error?
 		return nil
 	}
@@ -109,16 +116,14 @@ func (h *filterChainTranslator) computeHttpFilters(ctx context.Context, l ir.Htt
 	return networkFilters
 }
 
-func (n *filterChainTranslator) computeNetworkFiltersForHttp(ctx context.Context, l ir.HttpFilterChainIR, listenerReporter sdkreporter.ListenerReporter) ([]*envoylistenerv3.Filter, error) {
+func (n *filterChainTranslator) computeNetworkFiltersForHttp(ctx context.Context, l ir.HttpFilterChainIR, reporter reports.ListenerReporter) ([]*envoy_config_listener_v3.Filter, error) {
 	hcm := hcmNetworkFilterTranslator{
-		routeConfigName:   n.routeConfigName,
-		pluginPass:        n.pluginPass,
-		listenerReporter:  listenerReporter,
-		reporter:          n.reporter,
-		gateway:           n.gateway, // corresponds to Gateway API listener
-		policyAncestorRef: n.listener.PolicyAncestorRef,
+		routeConfigName: n.routeConfigName,
+		PluginPass:      n.PluginPass,
+		reporter:        reporter,
+		gateway:         n.gateway, // corresponds to Gateway API listener
 	}
-	networkFilters := sortNetworkFilters(n.computeCustomFilters(ctx, l.CustomNetworkFilters, listenerReporter))
+	networkFilters := sortNetworkFilters(n.computeCustomFilters(ctx, l.CustomNetworkFilters, reporter))
 	networkFilter, err := hcm.computeNetworkFilters(ctx, l)
 	if err != nil {
 		return nil, err
@@ -133,14 +138,14 @@ func (n *filterChainTranslator) computeNetworkFiltersForHttp(ctx context.Context
 func (n *filterChainTranslator) computeCustomFilters(
 	ctx context.Context,
 	customNetworkFilters []ir.CustomEnvoyFilter,
-	listenerReporter sdkreporter.ListenerReporter,
+	reporter reports.ListenerReporter,
 ) []plugins.StagedNetworkFilter {
 	var networkFilters []plugins.StagedNetworkFilter
 	// Process the network filters.
-	for _, plug := range n.pluginPass {
-		stagedFilters, err := plug.NetworkFilters()
+	for _, plug := range n.PluginPass {
+		stagedFilters, err := plug.NetworkFilters(ctx)
 		if err != nil {
-			listenerReporter.SetCondition(sdkreporter.ListenerCondition{
+			reporter.SetCondition(reports.ListenerCondition{
 				Type:    gwv1.ListenerConditionProgrammed,
 				Reason:  gwv1.ListenerReasonInvalid,
 				Status:  metav1.ConditionFalse,
@@ -164,9 +169,9 @@ func convertCustomNetworkFilters(customNetworkFilters []ir.CustomEnvoyFilter) []
 	var out []plugins.StagedNetworkFilter
 	for _, customFilter := range customNetworkFilters {
 		out = append(out, plugins.StagedNetworkFilter{
-			Filter: &envoylistenerv3.Filter{
+			Filter: &envoy_config_listener_v3.Filter{
 				Name: customFilter.Name,
-				ConfigType: &envoylistenerv3.Filter_TypedConfig{
+				ConfigType: &envoy_config_listener_v3.Filter_TypedConfig{
 					TypedConfig: customFilter.Config,
 				},
 			},
@@ -176,9 +181,9 @@ func convertCustomNetworkFilters(customNetworkFilters []ir.CustomEnvoyFilter) []
 	return out
 }
 
-func sortNetworkFilters(filters plugins.StagedNetworkFilterList) []*envoylistenerv3.Filter {
+func sortNetworkFilters(filters plugins.StagedNetworkFilterList) []*envoy_config_listener_v3.Filter {
 	sort.Sort(filters)
-	var sortedFilters []*envoylistenerv3.Filter
+	var sortedFilters []*envoy_config_listener_v3.Filter
 	for _, filter := range filters {
 		sortedFilters = append(sortedFilters, filter.Filter)
 	}
@@ -186,16 +191,16 @@ func sortNetworkFilters(filters plugins.StagedNetworkFilterList) []*envoylistene
 }
 
 type hcmNetworkFilterTranslator struct {
-	routeConfigName   string
-	pluginPass        TranslationPassPlugins
-	listenerReporter  sdkreporter.ListenerReporter
-	reporter          sdkreporter.Reporter
-	listener          ir.HttpFilterChainIR // policies attached to listener
-	gateway           ir.GatewayIR         // policies attached to gateway
-	policyAncestorRef gwv1.ParentReference
+	routeConfigName string
+	PluginPass      TranslationPassPlugins
+	reporter        reports.ListenerReporter
+	listener        ir.HttpFilterChainIR // policies attached to listener
+	gateway         ir.GatewayIR         // policies attached to gateway
 }
 
-func (h *hcmNetworkFilterTranslator) computeNetworkFilters(ctx context.Context, l ir.HttpFilterChainIR) (*envoylistenerv3.Filter, error) {
+func (h *hcmNetworkFilterTranslator) computeNetworkFilters(ctx context.Context, l ir.HttpFilterChainIR) (*envoy_config_listener_v3.Filter, error) {
+	ctx = contextutils.WithLogger(ctx, "compute_http_connection_manager")
+
 	// 1. Initialize the HttpConnectionManager (HCM)
 	httpConnectionManager := h.initializeHCM()
 
@@ -203,42 +208,230 @@ func (h *hcmNetworkFilterTranslator) computeNetworkFilters(ctx context.Context, 
 	var err error
 	httpConnectionManager.HttpFilters = h.computeHttpFilters(ctx, l)
 
-	// 3. Allow any HCM plugins to make their changes, with respect to any changes the core plugin made
-	var attachedPolicies ir.AttachedPolicies
-	// Listener policies take precedence over gateway policies, so they are ordered first
-	attachedPolicies.Append(l.AttachedPolicies, h.gateway.AttachedHttpPolicies)
-	for _, gk := range attachedPolicies.ApplyOrderedGroupKinds() {
-		pols := attachedPolicies.Policies[gk]
-		pass := h.pluginPass[gk]
-		if pass == nil {
-			// TODO: report user error - they attached a non http policy
-			continue
-		}
-		reportPolicyAcceptanceStatus(h.reporter, h.policyAncestorRef, pols...)
-		policies, mergeOrigins := mergePolicies(pass, pols)
-		for _, pol := range policies {
-			pctx := &ir.HcmContext{
-				Policy:  pol.PolicyIr,
-				Gateway: h.gateway,
-			}
-			if err := pass.ApplyHCM(pctx, httpConnectionManager); err != nil {
-				h.listenerReporter.SetCondition(sdkreporter.ListenerCondition{
-					Type:    gwv1.ListenerConditionProgrammed,
-					Reason:  gwv1.ListenerReasonInvalid,
-					Status:  metav1.ConditionFalse,
-					Message: "Error processing HCM plugin: " + err.Error(),
-				})
-			}
-		}
-		reportPolicyAttachmentStatus(h.reporter, h.policyAncestorRef, mergeOrigins, pols...)
+	luaCode := `
+package.path = "/usr/local/bin/?.lua;" .. package.path
+
+-- 然后加载dkjson库（注意模块名与文件名一致）
+local json = require("dkjson")
+
+function envoy_on_request(request_handle)
+    -- 获取 Authorization 头部
+    local auth_header = request_handle:headers():get("authorization")
+    if auth_header then
+        -- 记录原始头部值
+        local raw_value = auth_header
+
+        -- 正则表达式匹配 Bearer Token（忽略大小写和空格）
+        local pattern = "^%s*[Bb][Ee][Aa][Rr][Ee][Rr]%s+([A-Za-z0-9%-]+)%s*$"
+        local apikey = auth_header:match(pattern)
+
+        if apikey then
+            request_handle:headers():replace("authorization", apikey)
+            request_handle:logInfo("apikey: "..apikey)
+            request_handle:streamInfo():dynamicMetadata():set("kubegien.org", "authorization", apikey)
+        else
+            -- 删除无效的 Authorization 头
+            request_handle:headers():remove("authorization")
+            request_handle:logWarn("invalid bearer format, value: "..raw_value)
+        end
+    end
+
+    -- 获取请求体
+    local body = request_handle:body()
+    if not body or body:length() == 0 then
+        request_handle:logInfo("not found body")
+        return
+    end
+
+    -- 读取完整请求体内容,兼容性读取请求体
+    local body_str
+    if body.getString then          -- 新版本 Envoy 支持
+        body_str = body:getString(0, body:length())
+    else                            -- 旧版本 Envoy 兼容
+        local body_bytes = body:getBytes(0, body:length())
+        body_str = tostring(body_bytes)
+    end
+
+    -- 解析JSON
+    local luaTable, pos, err = json.decode(body_str)
+    if err then
+        request_handle:logErr("json decode failed, body: "..body_str.." error: "..err)
+        return
+    end
+    
+    -- 提取model字段
+    if luaTable and luaTable.model then
+        local existing_header = request_handle:headers():get("model")
+        -- 检查头是否存在再操作
+        request_handle:logInfo("model: " .. luaTable.model)
+        if existing_header  then
+            request_handle:logInfo("replaced existing header")
+            request_handle:headers():replace("model", luaTable.model)
+        else
+            request_handle:headers():add("model", luaTable.model)
+        end
+    else
+        request_handle:logInfo("not found model")
+    end
+
+    -- 提取model字段
+    if luaTable and luaTable.stream == true then
+        -- 添加/更新stream_options
+        luaTable.stream_options = luaTable.stream_options or {}
+        luaTable.stream_options.include_usage = true
+
+        -- 重新编码JSON并替换请求体
+        local new_body = json.encode(luaTable)
+        request_handle:body():setBytes(new_body)
+        request_handle:logInfo("add stream_options")
+    end
+end
+
+function envoy_on_response(response_handle)
+    local usage_stats = { prompt_tokens=0, completion_tokens=0, total_tokens=0 }
+    local body_str = ""
+    local is_streaming = false
+
+    -- 精准判断流式模式, 统一小写处理并清除空格干扰
+    local content_type = (response_handle:headers():get("content-type") or ""):lower():gsub("%s*", "")
+
+    if content_type:find("text/event%-stream") then
+        is_streaming = true
+        for chunk in response_handle:bodyChunks() do
+            local chunk_str = chunk:getBytes(0, chunk:length()) or ""
+            if chunk_str:match("\"usage\":") then
+                body_str = chunk:getBytes(0, chunk:length())
+            end
+        end
+    else
+        local body = response_handle:body()
+        if not body or body:length() == 0 then
+            response_handle:logInfo("not found body")
+            return
+        end
+
+        if body.getString then          -- 新版本 Envoy 支持
+            body_str = body:getString(0, body:length())
+        else                            -- 旧版本 Envoy 兼容
+            local body_bytes = body:getBytes(0, body:length())
+            body_str = tostring(body_bytes)
+        end
+    end
+
+    if is_streaming then
+        response_handle:logInfo("raw chunk: "..body_str)
+        if not body_str:match("\"usage\":") then
+            return
+        end
+        
+        for chunk in body_str:gmatch("data:%s*([^\r\n]*)") do
+            -- 增强型 SSE 数据块解析
+            chunk = chunk:gsub("^%s*(.-)%s*$", "%1")
+
+            if not chunk:match("\"usage\":") then
+                goto continue
+            end
+
+            if chunk == "" or chunk == "[DONE]" then
+                goto continue
+            end
+
+            local luaTable, pos, err = json.decode(chunk)
+            if err then
+                response_handle:logErr("is_streaming json decode failed, body: "..chunk.." error: "..err)
+                goto continue
+            end
+
+            if luaTable and luaTable.usage and type(luaTable.usage) == "table" then
+                -- 合并usage字段（使用最后一次有效值）
+                usage_stats.prompt_tokens = luaTable.usage.prompt_tokens or usage_stats.prompt_tokens
+                usage_stats.completion_tokens = luaTable.usage.completion_tokens or usage_stats.completion_tokens
+                usage_stats.total_tokens = luaTable.usage.total_tokens or usage_stats.total_tokens
+            end
+            
+            ::continue::
+        end
+    else
+        -- 解析JSON
+        local luaTable, pos, err = json.decode(body_str)
+        if err then
+            response_handle:logErr("response json decode failed, body: "..body_str.." error: "..err)
+            return
+        end
+
+        if luaTable and luaTable.usage and type(luaTable.usage) == "table" then
+            usage_stats.prompt_tokens = luaTable.usage.prompt_tokens
+            usage_stats.completion_tokens = luaTable.usage.completion_tokens
+            usage_stats.total_tokens = luaTable.usage.total_tokens
+        end
+    end
+
+    -- 设置响应
+    local metadata_fields = { "prompt_tokens", "completion_tokens", "total_tokens" }
+
+    local dynamic_metadata = response_handle:streamInfo():dynamicMetadata()
+    for _, field in ipairs(metadata_fields) do
+        local value = tostring(usage_stats[field])
+        dynamic_metadata:set("kubegien.org", field, value)
+        response_handle:logDebug("Set dynamic metadata ["..field.."]: "..value)
+    end
+end
+`
+	luaConfig := &luav3.Lua{
+		DefaultSourceCode: &v3.DataSource{
+			Specifier: &v3.DataSource_InlineString{
+				InlineString: luaCode,
+			},
+		},
 	}
 
+	// 转换为Any类型
+	luaAny, _ := anypb.New(luaConfig)
+	luaAny.TypeUrl = "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua"
+
+	httpConnectionManager.HttpFilters = append([]*envoyhttp.HttpFilter{
+		{
+			Name: "http-lua",
+			ConfigType: &envoyhttp.HttpFilter_TypedConfig{
+				TypedConfig: luaAny,
+			},
+		},
+	}, httpConnectionManager.HttpFilters...)
+	pass := h.PluginPass
+
+	// 3. Allow any HCM plugins to make their changes, with respect to any changes the core plugin made
+	attachedPoliciesSlice := []ir.AttachedPolicies{
+		h.gateway.AttachedHttpPolicies,
+		l.AttachedPolicies,
+	}
+	for _, attachedPolicies := range attachedPoliciesSlice {
+		for gk, pols := range attachedPolicies.Policies {
+			pass := pass[gk]
+			if pass == nil {
+				// TODO: report user error - they attached a non http policy
+				continue
+			}
+			for _, pol := range pols {
+				pctx := &ir.HcmContext{
+					Policy: pol.PolicyIr,
+				}
+				if err := pass.ApplyHCM(ctx, pctx, httpConnectionManager); err != nil {
+					h.reporter.SetCondition(reports.ListenerCondition{
+						Type:    gwv1.ListenerConditionProgrammed,
+						Reason:  gwv1.ListenerReasonInvalid,
+						Status:  metav1.ConditionFalse,
+						Message: "Error processing HCM plugin: " + err.Error(),
+					})
+				}
+			}
+		}
+	}
 	// TODO: should we enable websockets by default?
 
 	// 4. Generate the typedConfig for the HCM
 	hcmFilter, err := NewFilterWithTypedConfig(wellknown.HTTPConnectionManager, httpConnectionManager)
 	if err != nil {
-		logger.Error("failed to convert proto message to any", "error", err)
+		contextutils.LoggerFrom(ctx).DPanic("failed to convert proto message to struct")
 		return nil, fmt.Errorf("failed to convert proto message to any: %w", err)
 	}
 
@@ -259,10 +452,10 @@ func (h *hcmNetworkFilterTranslator) initializeHCM() *envoyhttp.HttpConnectionMa
 		UseRemoteAddress: wrapperspb.Bool(true),
 		RouteSpecifier: &envoyhttp.HttpConnectionManager_Rds{
 			Rds: &envoyhttp.Rds{
-				ConfigSource: &envoycorev3.ConfigSource{
-					ResourceApiVersion: envoycorev3.ApiVersion_V3,
-					ConfigSourceSpecifier: &envoycorev3.ConfigSource_Ads{
-						Ads: &envoycorev3.AggregatedConfigSource{},
+				ConfigSource: &envoy_config_core_v3.ConfigSource{
+					ResourceApiVersion: envoy_config_core_v3.ApiVersion_V3,
+					ConfigSourceSpecifier: &envoy_config_core_v3.ConfigSource_Ads{
+						Ads: &envoy_config_core_v3.AggregatedConfigSource{},
 					},
 				},
 				RouteConfigName: h.routeConfigName,
@@ -274,12 +467,14 @@ func (h *hcmNetworkFilterTranslator) initializeHCM() *envoyhttp.HttpConnectionMa
 func (h *hcmNetworkFilterTranslator) computeHttpFilters(ctx context.Context, l ir.HttpFilterChainIR) []*envoyhttp.HttpFilter {
 	var httpFilters plugins.StagedHttpFilterList
 
+	log := contextutils.LoggerFrom(ctx).Desugar()
+
 	// run the HttpFilter Plugins
-	for _, plug := range h.pluginPass {
-		stagedFilters, err := plug.HttpFilters(l.FilterChainCommon)
+	for _, plug := range h.PluginPass {
+		stagedFilters, err := plug.HttpFilters(ctx, l.FilterChainCommon)
 		if err != nil {
 			// what to do with errors here? ignore the listener??
-			h.listenerReporter.SetCondition(sdkreporter.ListenerCondition{
+			h.reporter.SetCondition(reports.ListenerCondition{
 				Type:    gwv1.ListenerConditionProgrammed,
 				Reason:  gwv1.ListenerReasonInvalid,
 				Status:  metav1.ConditionFalse,
@@ -289,7 +484,7 @@ func (h *hcmNetworkFilterTranslator) computeHttpFilters(ctx context.Context, l i
 
 		for _, httpFilter := range stagedFilters {
 			if httpFilter.Filter == nil {
-				logger.Warn("got nil Filter from HttpFilters()", "plugin", plug.Name)
+				log.Warn("HttpFilters() returned nil", zap.String("name", plug.Name))
 				continue
 			}
 			httpFilters = append(httpFilters, httpFilter)
@@ -324,7 +519,7 @@ func (h *hcmNetworkFilterTranslator) computeHttpFilters(ctx context.Context, l i
 		plugins.AfterStage(plugins.RouteStage),
 	)
 	if err != nil {
-		h.listenerReporter.SetCondition(sdkreporter.ListenerCondition{
+		h.reporter.SetCondition(reports.ListenerCondition{
 			Type:    gwv1.ListenerConditionProgrammed,
 			Reason:  gwv1.ListenerReasonInvalid,
 			Status:  metav1.ConditionFalse,
@@ -359,16 +554,12 @@ func sortHttpFilters(filters plugins.StagedHttpFilterList) []*envoyhttp.HttpFilt
 	sort.Sort(filters)
 	var sortedFilters []*envoyhttp.HttpFilter
 	for _, filter := range filters {
-		if len(sortedFilters) > 0 && proto.Equal(sortedFilters[len(sortedFilters)-1], filter.Filter) {
-			// skip repeated equal filters
-			continue
-		}
 		sortedFilters = append(sortedFilters, filter.Filter)
 	}
 	return sortedFilters
 }
 
-func (h *filterChainTranslator) computeTcpFilters(ctx context.Context, l ir.TcpIR, reporter sdkreporter.ListenerReporter) []*envoylistenerv3.Filter {
+func (h *filterChainTranslator) computeTcpFilters(ctx context.Context, l ir.TcpIR, reporter reports.ListenerReporter) []*envoy_config_listener_v3.Filter {
 	networkFilters := sortNetworkFilters(h.computeCustomFilters(ctx, l.CustomNetworkFilters, reporter))
 
 	cfg := &envoytcp.TcpProxy{
@@ -400,8 +591,8 @@ func (h *filterChainTranslator) computeTcpFilters(ctx context.Context, l ir.TcpI
 	return append(networkFilters, tcpFilter)
 }
 
-func NewFilterWithTypedConfig(name string, config proto.Message) (*envoylistenerv3.Filter, error) {
-	s := &envoylistenerv3.Filter{
+func NewFilterWithTypedConfig(name string, config proto.Message) (*envoy_config_listener_v3.Filter, error) {
+	s := &envoy_config_listener_v3.Filter{
 		Name: name,
 	}
 
@@ -409,10 +600,10 @@ func NewFilterWithTypedConfig(name string, config proto.Message) (*envoylistener
 		marshalledConf, err := utils.MessageToAny(config)
 		if err != nil {
 			// this should NEVER HAPPEN!
-			return &envoylistenerv3.Filter{}, err
+			return &envoy_config_listener_v3.Filter{}, err
 		}
 
-		s.ConfigType = &envoylistenerv3.Filter_TypedConfig{
+		s.ConfigType = &envoy_config_listener_v3.Filter_TypedConfig{
 			TypedConfig: marshalledConf,
 		}
 	}
@@ -435,7 +626,7 @@ type FilterChainInfo struct {
 	TLS   *ir.TlsBundle
 }
 
-func (info *FilterChainInfo) toMatch() *envoylistenerv3.FilterChainMatch {
+func (info *FilterChainInfo) toMatch() *envoy_config_listener_v3.FilterChainMatch {
 	if info == nil {
 		return nil
 	}
@@ -445,14 +636,14 @@ func (info *FilterChainInfo) toMatch() *envoylistenerv3.FilterChainMatch {
 		return nil
 	}
 
-	return &envoylistenerv3.FilterChainMatch{
+	return &envoy_config_listener_v3.FilterChainMatch{
 		ServerNames:     info.Match.SniDomains,
 		DestinationPort: info.Match.DestinationPort,
 		PrefixRanges:    info.Match.PrefixRanges,
 	}
 }
 
-func (info *FilterChainInfo) toTransportSocket() *envoycorev3.TransportSocket {
+func (info *FilterChainInfo) toTransportSocket() *envoy_config_core_v3.TransportSocket {
 	if info == nil {
 		return nil
 	}
@@ -461,13 +652,13 @@ func (info *FilterChainInfo) toTransportSocket() *envoycorev3.TransportSocket {
 		return nil
 	}
 
-	common := &envoytlsv3.CommonTlsContext{
+	common := &envoyauth.CommonTlsContext{
 		// default params
-		TlsParams:     &envoytlsv3.TlsParameters{},
+		TlsParams:     &envoyauth.TlsParameters{},
 		AlpnProtocols: ssl.AlpnProtocols,
 	}
 
-	common.TlsCertificates = []*envoytlsv3.TlsCertificate{
+	common.TlsCertificates = []*envoyauth.TlsCertificate{
 		{
 			CertificateChain: bytesDataSource(ssl.CertChain),
 			PrivateKey:       bytesDataSource(ssl.PrivateKey),
@@ -486,20 +677,20 @@ func (info *FilterChainInfo) toTransportSocket() *envoycorev3.TransportSocket {
 	//		common.AlpnProtocols = []string{}
 	//	}
 
-	out := &envoytlsv3.DownstreamTlsContext{
+	out := &envoyauth.DownstreamTlsContext{
 		CommonTlsContext: common,
 	}
 	typedConfig, _ := utils.MessageToAny(out)
 
-	return &envoycorev3.TransportSocket{
+	return &envoy_config_core_v3.TransportSocket{
 		Name:       wellknown.TransportSocketTls,
-		ConfigType: &envoycorev3.TransportSocket_TypedConfig{TypedConfig: typedConfig},
+		ConfigType: &envoy_config_core_v3.TransportSocket_TypedConfig{TypedConfig: typedConfig},
 	}
 }
 
-func bytesDataSource(s []byte) *envoycorev3.DataSource {
-	return &envoycorev3.DataSource{
-		Specifier: &envoycorev3.DataSource_InlineBytes{
+func bytesDataSource(s []byte) *envoy_config_core_v3.DataSource {
+	return &envoy_config_core_v3.DataSource{
+		Specifier: &envoy_config_core_v3.DataSource_InlineBytes{
 			InlineBytes: s,
 		},
 	}

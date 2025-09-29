@@ -143,19 +143,14 @@ func (i *TestInstallation) CreateIstioBugReport(ctx context.Context) {
 }
 
 func (i *TestInstallation) InstallKgatewayFromLocalChart(ctx context.Context) {
-	i.InstallKgatewayCRDsFromLocalChart(ctx)
-	i.InstallKgatewayCoreFromLocalChart(ctx)
-}
-
-func (i *TestInstallation) InstallKgatewayCRDsFromLocalChart(ctx context.Context) {
 	if testutils.ShouldSkipInstall() {
 		return
 	}
 
 	// install the CRD chart first
-	crdChartURI, err := helper.GetLocalChartPath(helmutils.CRDChartName, "")
+	crdChartURI, err := helper.GetLocalChartPath(helmutils.CRDChartName)
 	i.Assertions.Require.NoError(err)
-	err = i.Actions.Helm().WithReceiver(os.Stdout).Upgrade(
+	err = i.Actions.Helm().WithReceiver(os.Stdout).Install(
 		ctx,
 		helmutils.InstallOpts{
 			CreateNamespace: true,
@@ -164,17 +159,11 @@ func (i *TestInstallation) InstallKgatewayCRDsFromLocalChart(ctx context.Context
 			ChartUri:        crdChartURI,
 		})
 	i.Assertions.Require.NoError(err)
-}
-
-func (i *TestInstallation) InstallKgatewayCoreFromLocalChart(ctx context.Context) {
-	if testutils.ShouldSkipInstall() {
-		return
-	}
 
 	// and then install the main chart
-	chartUri, err := helper.GetLocalChartPath(helmutils.ChartName, "")
+	chartUri, err := helper.GetLocalChartPath(helmutils.ChartName)
 	i.Assertions.Require.NoError(err)
-	err = i.Actions.Helm().WithReceiver(os.Stdout).Upgrade(
+	err = i.Actions.Helm().WithReceiver(os.Stdout).Install(
 		ctx,
 		helmutils.InstallOpts{
 			Namespace:       i.Metadata.InstallNamespace,
@@ -182,7 +171,6 @@ func (i *TestInstallation) InstallKgatewayCoreFromLocalChart(ctx context.Context
 			ValuesFiles:     []string{i.Metadata.ProfileValuesManifestFile, i.Metadata.ValuesManifestFile},
 			ReleaseName:     helmutils.ChartName,
 			ChartUri:        chartUri,
-			ExtraArgs:       i.Metadata.ExtraHelmArgs,
 		})
 	i.Assertions.Require.NoError(err)
 	i.Assertions.EventuallyKgatewayInstallSucceeded(ctx)
@@ -196,11 +184,6 @@ func (i *TestInstallation) InstallKgatewayCoreFromLocalChart(ctx context.Context
 // }
 
 func (i *TestInstallation) UninstallKgateway(ctx context.Context) {
-	i.UninstallKgatewayCore(ctx)
-	i.UninstallKgatewayCRDs(ctx)
-}
-
-func (i *TestInstallation) UninstallKgatewayCore(ctx context.Context) {
 	if testutils.ShouldSkipInstall() {
 		return
 	}
@@ -215,15 +198,9 @@ func (i *TestInstallation) UninstallKgatewayCore(ctx context.Context) {
 	)
 	i.Assertions.Require.NoError(err, "failed to uninstall main chart")
 	i.Assertions.EventuallyKgatewayUninstallSucceeded(ctx)
-}
-
-func (i *TestInstallation) UninstallKgatewayCRDs(ctx context.Context) {
-	if testutils.ShouldSkipInstall() {
-		return
-	}
 
 	// uninstall the CRD chart
-	err := i.Actions.Helm().Uninstall(
+	err = i.Actions.Helm().Uninstall(
 		ctx,
 		helmutils.UninstallOpts{
 			Namespace:   i.Metadata.InstallNamespace,
@@ -231,6 +208,8 @@ func (i *TestInstallation) UninstallKgatewayCRDs(ctx context.Context) {
 		},
 	)
 	i.Assertions.Require.NoError(err, "failed to uninstall CRD chart")
+
+	// TODO: Remove the namespace.
 }
 
 // PreFailHandler is the function that is invoked if a test in the given TestInstallation fails
@@ -252,7 +231,7 @@ func (i *TestInstallation) PreFailHandler(ctx context.Context) {
 	i.Assertions.Require.NoError(err)
 
 	// Dump the logs and state of the cluster
-	helpers.StandardKgatewayDumpOnFail(os.Stdout, i.Actions.Kubectl(), failureDir, namespaces)()
+	helpers.StandardKgatewayDumpOnFail(os.Stdout, failureDir, namespaces)()
 }
 
 // GeneratedFiles is a collection of files that are generated during the execution of a set of tests
@@ -260,7 +239,7 @@ type GeneratedFiles struct {
 	// TempDir is the directory where any temporary files should be created
 	// Tests may create files for any number of reasons:
 	// - A: When a test renders objects in a file, and then uses this file to create and delete values
-	// - B: When a test invokes a command that produces a file as a side effect
+	// - B: When a test invokes a command that produces a file as a side effect (glooctl, for example)
 	// Files in this directory are an implementation detail of the test itself.
 	// As a result, it is the callers responsibility to clean up the TempDir when the tests complete
 	TempDir string

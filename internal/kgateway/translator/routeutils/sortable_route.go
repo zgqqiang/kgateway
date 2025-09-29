@@ -17,23 +17,9 @@ type SortableRoute struct {
 
 type SortableRoutes []*SortableRoute
 
-func (a SortableRoutes) Len() int {
-	return len(a)
-}
-
-func (a SortableRoutes) Swap(i, j int) {
-	a[i], a[j] = a[j], a[i]
-}
-
-func (a SortableRoutes) Less(i, j int) bool {
-	// If weights are different, use weight to determine order
-	if a[i].Route.PrecedenceWeight != a[j].Route.PrecedenceWeight {
-		return a[i].Route.PrecedenceWeight > a[j].Route.PrecedenceWeight
-	}
-
-	// If weights are equal, use the existing comparison logic
-	return !routeWrapperLessFunc(a[i], a[j])
-}
+func (a SortableRoutes) Len() int           { return len(a) }
+func (a SortableRoutes) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a SortableRoutes) Less(i, j int) bool { return !routeWrapperLessFunc(a[i], a[j]) }
 
 func (a SortableRoutes) ToRoutes() []ir.HttpRouteRuleMatchIR {
 	routes := make([]ir.HttpRouteRuleMatchIR, 0, len(a))
@@ -138,32 +124,12 @@ func routeWrapperLessFunc(wrapperA, wrapperB *SortableRoute) bool {
 		return len(matchA.QueryParams) < len(matchB.QueryParams)
 	}
 
-	wrapperASource := wrapperA.RouteObject
-	wrapperBSource := wrapperB.RouteObject
-
-	// Compare the 2 objects
-	if !wrapperASource.GetCreationTimestamp().Time.Equal(wrapperBSource.GetCreationTimestamp().Time) {
-		return wrapperASource.GetCreationTimestamp().After(wrapperBSource.GetCreationTimestamp().Time)
+	if !wrapperA.RouteObject.GetCreationTimestamp().Time.Equal(wrapperB.RouteObject.GetCreationTimestamp().Time) {
+		return wrapperA.RouteObject.GetCreationTimestamp().After(wrapperB.RouteObject.GetCreationTimestamp().Time)
 	}
-	if wrapperASource.GetName() != wrapperBSource.GetName() || wrapperASource.GetNamespace() != wrapperBSource.GetNamespace() {
-		return types.NamespacedName{Namespace: wrapperASource.GetNamespace(), Name: wrapperASource.GetName()}.String() >
-			types.NamespacedName{Namespace: wrapperBSource.GetNamespace(), Name: wrapperBSource.GetName()}.String()
-	}
-
-	// If these are delegated routes, compare their sources
-	if wrapperA.Route.DelegatingParent != nil {
-		wrapperASource = wrapperA.Route.Parent.SourceObject
-	}
-	if wrapperB.Route.DelegatingParent != nil {
-		wrapperBSource = wrapperB.Route.Parent.SourceObject
-	}
-	// Repeat the object comparison but with original sources
-	if !wrapperASource.GetCreationTimestamp().Time.Equal(wrapperBSource.GetCreationTimestamp().Time) {
-		return wrapperASource.GetCreationTimestamp().After(wrapperBSource.GetCreationTimestamp().Time)
-	}
-	if wrapperASource.GetName() != wrapperBSource.GetName() || wrapperASource.GetNamespace() != wrapperBSource.GetNamespace() {
-		return types.NamespacedName{Namespace: wrapperASource.GetNamespace(), Name: wrapperASource.GetName()}.String() >
-			types.NamespacedName{Namespace: wrapperBSource.GetNamespace(), Name: wrapperBSource.GetName()}.String()
+	if wrapperA.RouteObject.GetName() != wrapperB.RouteObject.GetName() || wrapperA.RouteObject.GetNamespace() != wrapperB.RouteObject.GetNamespace() {
+		return types.NamespacedName{Namespace: wrapperA.RouteObject.GetNamespace(), Name: wrapperA.RouteObject.GetName()}.String() >
+			types.NamespacedName{Namespace: wrapperB.RouteObject.GetNamespace(), Name: wrapperB.RouteObject.GetName()}.String()
 	}
 
 	return wrapperA.Idx > wrapperB.Idx

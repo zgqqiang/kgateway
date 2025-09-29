@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	envoycorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	envoyroutev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	envoy_config_route_v3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	envoy_ext_proc_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/ext_proc/v3"
 	envoytransformation "github.com/solo-io/envoy-gloo/go/config/filter/http/transformation/v2"
 	"google.golang.org/protobuf/proto"
@@ -19,18 +19,28 @@ import (
 )
 
 func TestApplyAIBackend(t *testing.T) {
-	customPath := "/api/v1/chat/completions"
-	customHeader := "custom-header "
-	customPrefix := "custom-prefix "
+	typedFilterConfig := ir.TypedFilterConfigMap(map[string]proto.Message{})
+	pCtx := &ir.RouteBackendContext{
+		TypedFilterConfig: typedFilterConfig,
+		Backend: &ir.BackendObjectIR{
+			ObjectSource: ir.ObjectSource{
+				Group:     "test",
+				Kind:      "test-backend-plugin",
+				Namespace: "test-backend-plugin-ns",
+				Name:      "test-backend-plugin-us",
+			},
+		},
+		FilterChainName: "test",
+	}
 
-	outRoute := &envoyroutev3.Route{}
+	outRoute := &envoy_config_route_v3.Route{}
 
 	tests := []struct {
 		name                string
 		aiBackend           *v1alpha1.AIBackend
 		pCtx                *ir.RouteBackendContext
 		in                  ir.HttpBackend
-		out                 *envoyroutev3.Route
+		out                 *envoy_config_route_v3.Route
 		expectedError       string
 		expectedTypedConfig *map[string]proto.Message
 	}{
@@ -38,22 +48,25 @@ func TestApplyAIBackend(t *testing.T) {
 			name: "Single LLM provider",
 			aiBackend: &v1alpha1.AIBackend{
 				LLM: &v1alpha1.LLMProvider{
-					OpenAI: &v1alpha1.OpenAIConfig{
-						Model: ptr.To("gpt-3"),
-						AuthToken: v1alpha1.SingleAuthToken{
-							Kind:   v1alpha1.SingleAuthTokenKind("Inline"),
-							Inline: ptr.To("test1"),
+					Provider: v1alpha1.SupportedLLMProvider{
+						OpenAI: &v1alpha1.OpenAIConfig{
+							Model: ptr.To("gpt-3"),
+							AuthToken: v1alpha1.SingleAuthToken{
+								Kind:   v1alpha1.SingleAuthTokenKind("Inline"),
+								Inline: ptr.To("test1"),
+							},
 						},
 					},
 				},
 			},
+			pCtx:          pCtx,
 			out:           outRoute,
 			expectedError: "",
 			expectedTypedConfig: &map[string]proto.Message{
 				wellknown.AIExtProcFilterName: &envoy_ext_proc_v3.ExtProcPerRoute{
 					Override: &envoy_ext_proc_v3.ExtProcPerRoute_Overrides{
 						Overrides: &envoy_ext_proc_v3.ExtProcOverrides{
-							GrpcInitialMetadata: []*envoycorev3.HeaderValue{
+							GrpcInitialMetadata: []*envoy_config_core_v3.HeaderValue{
 								{
 									Key:   "x-llm-provider",
 									Value: "openai",
@@ -109,74 +122,30 @@ func TestApplyAIBackend(t *testing.T) {
 			},
 		},
 		{
-			name: "Single LLM provider with custom path",
+			name: "Multiple LLM providers with different types",
 			aiBackend: &v1alpha1.AIBackend{
-				LLM: &v1alpha1.LLMProvider{
-					Path: &v1alpha1.PathOverride{Full: &customPath},
-					AuthHeader: &v1alpha1.AuthHeader{
-						Prefix:     &customPrefix,
-						HeaderName: &customHeader,
-					},
-					OpenAI: &v1alpha1.OpenAIConfig{
-						Model: ptr.To("gpt-3"),
-						AuthToken: v1alpha1.SingleAuthToken{
-							Kind:   v1alpha1.SingleAuthTokenKind("Inline"),
-							Inline: ptr.To("test1"),
-						},
-					},
-				},
-			},
-			out:           outRoute,
-			expectedError: "",
-			expectedTypedConfig: &map[string]proto.Message{
-				wellknown.AIExtProcFilterName: &envoy_ext_proc_v3.ExtProcPerRoute{
-					Override: &envoy_ext_proc_v3.ExtProcPerRoute_Overrides{
-						Overrides: &envoy_ext_proc_v3.ExtProcOverrides{
-							GrpcInitialMetadata: []*envoycorev3.HeaderValue{
-								{
-									Key:   "x-llm-provider",
-									Value: "openai",
-								},
-								{
-									Key:   "x-llm-model",
-									Value: "gpt-3",
-								},
-								{
-									Key:   "x-request-id",
-									Value: "%REQ(X-REQUEST-ID)%",
-								},
-							},
-						},
-					},
-				},
-				wellknown.AIBackendTransformationFilterName: &envoytransformation.RouteTransformations{
-					Transformations: []*envoytransformation.RouteTransformations_RouteTransformation{
+				MultiPool: &v1alpha1.MultiPoolConfig{
+					Priorities: []v1alpha1.Priority{
 						{
-							Match: &envoytransformation.RouteTransformations_RouteTransformation_RequestMatch_{
-								RequestMatch: &envoytransformation.RouteTransformations_RouteTransformation_RequestMatch{
-									RequestTransformation: &envoytransformation.Transformation{
-										LogRequestResponseInfo: &wrapperspb.BoolValue{},
-										TransformationType: &envoytransformation.Transformation_TransformationTemplate{
-											TransformationTemplate: &envoytransformation.TransformationTemplate{
-												Headers: map[string]*envoytransformation.InjaTemplate{
-													":path": {
-														Text: customPath,
-													},
-													customHeader: {
-														Text: customPrefix + `{% if host_metadata("auth_token") != "" %}{{host_metadata("auth_token")}}{% else %}{{dynamic_metadata("auth_token","ai.kgateway.io")}}{% endif %}`,
-													},
-												},
-												BodyTransformation: &envoytransformation.TransformationTemplate_MergeJsonKeys{
-													MergeJsonKeys: &envoytransformation.MergeJsonKeys{
-														JsonKeys: map[string]*envoytransformation.MergeJsonKeys_OverridableTemplate{
-															"model": {
-																Tmpl: &envoytransformation.InjaTemplate{
-																	Text: `{% if host_metadata("model") != "" %}"{{host_metadata("model")}}"{% else %}"{{model}}"{% endif %}`,
-																},
-															},
-														},
-													},
-												},
+							Pool: []v1alpha1.LLMProvider{
+								{
+									Provider: v1alpha1.SupportedLLMProvider{
+										OpenAI: &v1alpha1.OpenAIConfig{
+											Model: ptr.To("gpt-3"),
+											AuthToken: v1alpha1.SingleAuthToken{
+												Kind:   v1alpha1.SingleAuthTokenKind("Inline"),
+												Inline: ptr.To("test1"),
+											},
+										},
+									},
+								},
+								{
+									Provider: v1alpha1.SupportedLLMProvider{
+										Anthropic: &v1alpha1.AnthropicConfig{
+											Model: ptr.To("claude"),
+											AuthToken: v1alpha1.SingleAuthToken{
+												Kind:   v1alpha1.SingleAuthTokenKind("Inline"),
+												Inline: ptr.To("test2"),
 											},
 										},
 									},
@@ -186,41 +155,7 @@ func TestApplyAIBackend(t *testing.T) {
 					},
 				},
 			},
-		},
-		{
-			name: "Multiple LLM providers with different types",
-			aiBackend: &v1alpha1.AIBackend{
-				PriorityGroups: []v1alpha1.PriorityGroup{
-					{
-						Providers: []v1alpha1.NamedLLMProvider{
-							{
-								Name: "openai",
-								LLMProvider: v1alpha1.LLMProvider{
-									OpenAI: &v1alpha1.OpenAIConfig{
-										Model: ptr.To("gpt-3"),
-										AuthToken: v1alpha1.SingleAuthToken{
-											Kind:   v1alpha1.SingleAuthTokenKind("Inline"),
-											Inline: ptr.To("test1"),
-										},
-									},
-								},
-							},
-							{
-								Name: "anthropic",
-								LLMProvider: v1alpha1.LLMProvider{
-									Anthropic: &v1alpha1.AnthropicConfig{
-										Model: ptr.To("claude"),
-										AuthToken: v1alpha1.SingleAuthToken{
-											Kind:   v1alpha1.SingleAuthTokenKind("Inline"),
-											Inline: ptr.To("test2"),
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
+			pCtx:                pCtx,
 			out:                 outRoute,
 			expectedError:       "multiple AI backend types found for single ai route",
 			expectedTypedConfig: nil,
@@ -229,20 +164,6 @@ func TestApplyAIBackend(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			typedFilterConfig := ir.TypedFilterConfigMap(map[string]proto.Message{})
-			pCtx := &ir.RouteBackendContext{
-				TypedFilterConfig: typedFilterConfig,
-				Backend: &ir.BackendObjectIR{
-					ObjectSource: ir.ObjectSource{
-						Group:     "test",
-						Kind:      "test-backend-plugin",
-						Namespace: "test-backend-plugin-ns",
-						Name:      "test-backend-plugin-us",
-					},
-				},
-				FilterChainName: "test",
-			}
-			tt.pCtx = pCtx
 			aiIR := &IR{}
 			err := PreprocessAIBackend(context.Background(), tt.aiBackend, aiIR)
 			if tt.expectedError != "" && err == nil {

@@ -29,34 +29,34 @@
 package sandwich
 
 import (
+	"context"
 	"time"
 
-	envoycorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	envoylistenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	envoy_config_listener_v3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	sfsvalue "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/common/set_filter_state/v3"
 	proxy_protocol "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/listener/proxy_protocol/v3"
 	sfsnetwork "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/set_filter_state/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
-	"istio.io/istio/pilot/pkg/util/protoconv"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	extensionsplug "github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/plugin"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/plugins"
-	sdk "github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/reporter"
+
+	"istio.io/istio/pilot/pkg/util/protoconv"
 )
 
-func NewPlugin() sdk.Plugin {
-	return sdk.Plugin{
-		ContributesPolicies: sdk.ContributesPolicies{
-			SandwichedInboundGK: sdk.PolicyPlugin{
+func NewPlugin() extensionsplug.Plugin {
+	return extensionsplug.Plugin{
+		ContributesPolicies: extensionsplug.ContributesPolicies{
+			SandwichedInboundGK: extensionsplug.PolicyPlugin{
 				Name: "sandwich",
-				NewGatewayTranslationPass: func(tctx ir.GwTranslationCtx, reporter reporter.Reporter) ir.ProxyTranslationPass {
+				NewGatewayTranslationPass: func(ctx context.Context, tctx ir.GwTranslationCtx) ir.ProxyTranslationPass {
 					// TODO we could read the waypoint-inbound-binding annotation here and set isSandwiched = true
 					// instead of using a policy set by translator?
-					return &sandwichedTranslationPass{
-						reporter: reporter,
-					}
+					return &sandwichedTranslationPass{}
 				},
 			},
 		},
@@ -89,7 +89,7 @@ func (w SandwichedInboundPolicy) Equals(in any) bool {
 
 type sandwichedTranslationPass struct {
 	ir.UnimplementedProxyTranslationPass
-	reporter reporter.Reporter
+
 	// isSandwiched is marked true when we process the listener
 	// so that we add the FilterChain level network filters
 	isSandwiched bool
@@ -100,7 +100,7 @@ var _ ir.ProxyTranslationPass = &sandwichedTranslationPass{}
 // ApplyListenerPlugin adds a ProxyProtocol ListenerFilter that
 // 1. Overrides source and destination addresses to be what the zTunnel saw.
 // 2. Grabs the ProxyProtocolPeerTLV (0xD0) used to propagate the client identity validated by zTunnel.
-func (s *sandwichedTranslationPass) ApplyListenerPlugin(pCtx *ir.ListenerContext, out *envoylistenerv3.Listener) {
+func (s *sandwichedTranslationPass) ApplyListenerPlugin(ctx context.Context, pCtx *ir.ListenerContext, out *envoy_config_listener_v3.Listener) {
 	_, ok := pCtx.Policy.(SandwichedInboundPolicy)
 	if !ok {
 		return
@@ -116,7 +116,7 @@ func (s *sandwichedTranslationPass) ApplyListenerPlugin(pCtx *ir.ListenerContext
 // the identity validated by zTunnel readable from Istio RBAC filters.
 // It does this by passing the TLV from PROXY Protocol into filter_state that
 // Istio's RBAC will read from.
-func (s *sandwichedTranslationPass) NetworkFilters() ([]plugins.StagedNetworkFilter, error) {
+func (s *sandwichedTranslationPass) NetworkFilters(ctx context.Context) ([]plugins.StagedNetworkFilter, error) {
 	if !s.isSandwiched {
 		return nil, nil
 	}
@@ -137,9 +137,9 @@ const ProxyProtocolPeerTLV uint32 = 0xD0
 // ProxyProtocolTLV is a listener filter that extracts the principal validated
 // by zTunnel and puts it into dynamic metadata.
 var (
-	ProxyProtocolTLV = &envoylistenerv3.ListenerFilter{
+	ProxyProtocolTLV = &listenerv3.ListenerFilter{
 		Name: wellknown.ProxyProtocol,
-		ConfigType: &envoylistenerv3.ListenerFilter_TypedConfig{
+		ConfigType: &listenerv3.ListenerFilter_TypedConfig{
 			TypedConfig: protoconv.MessageToAny(&proxy_protocol.ProxyProtocol{
 				Rules: []*proxy_protocol.ProxyProtocol_Rule{{
 					TlvType: ProxyProtocolPeerTLV,
@@ -156,9 +156,9 @@ var (
 	// metadata and moves it to the well-known filter state Istio uses in RBAC.
 	// This allows re-using Istio's control plane as a library to implement
 	// AuthorizationPolicy support.
-	ProxyProtocolTLVAuthorityNetworkFilter = &envoylistenerv3.Filter{
+	ProxyProtocolTLVAuthorityNetworkFilter = &listenerv3.Filter{
 		Name: "proxy_protocol_authority",
-		ConfigType: &envoylistenerv3.Filter_TypedConfig{
+		ConfigType: &listenerv3.Filter_TypedConfig{
 			TypedConfig: protoconv.MessageToAny(&sfsnetwork.Config{
 				OnNewConnection: []*sfsvalue.FilterStateValue{{
 					Key: &sfsvalue.FilterStateValue_ObjectKey{
@@ -166,10 +166,10 @@ var (
 					},
 					FactoryKey: "envoy.string",
 					Value: &sfsvalue.FilterStateValue_FormatString{
-						FormatString: &envoycorev3.SubstitutionFormatString{
-							Format: &envoycorev3.SubstitutionFormatString_TextFormatSource{
-								TextFormatSource: &envoycorev3.DataSource{
-									Specifier: &envoycorev3.DataSource_InlineString{
+						FormatString: &core.SubstitutionFormatString{
+							Format: &core.SubstitutionFormatString_TextFormatSource{
+								TextFormatSource: &core.DataSource{
+									Specifier: &core.DataSource_InlineString{
 										InlineString: "%DYNAMIC_METADATA(envoy.filters.listener.proxy_protocol:peer_principal)%",
 									},
 								},

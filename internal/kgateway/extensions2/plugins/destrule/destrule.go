@@ -13,8 +13,7 @@ import (
 	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/kube/kubetypes"
 
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/krtutil"
-	krtpkg "github.com/kgateway-dev/kgateway/v2/pkg/utils/krtutil"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/utils/krtutil"
 )
 
 type NsWithHostname struct {
@@ -58,10 +57,7 @@ func (c DestinationRuleWrapper) Equals(k DestinationRuleWrapper) bool {
 }
 
 func NewDestRuleIndex(istioClient kube.Client, krtopts *krtutil.KrtOptions) DestinationRuleIndex {
-	destRuleClient := kclient.NewDelayedInformer[*networkingclient.DestinationRule](
-		istioClient, gvr.DestinationRule, kubetypes.StandardInformer,
-		kclient.Filter{ObjectFilter: istioClient.ObjectFilter()},
-	)
+	destRuleClient := kclient.NewDelayedInformer[*networkingclient.DestinationRule](istioClient, gvr.DestinationRule, kubetypes.StandardInformer, kclient.Filter{})
 	rawDestrules := krt.WrapClient(destRuleClient, krtopts.ToOptions("DestinationRules")...)
 	destrules := krt.NewCollection(rawDestrules, func(kctx krt.HandlerContext, dr *networkingclient.DestinationRule) *DestinationRuleWrapper {
 		return &DestinationRuleWrapper{dr}
@@ -72,10 +68,18 @@ func NewDestRuleIndex(istioClient kube.Client, krtopts *krtutil.KrtOptions) Dest
 	}
 }
 
+func NewEmptyDestRuleIndex() DestinationRuleIndex {
+	destrules := krt.NewStaticCollection[DestinationRuleWrapper](nil)
+	return DestinationRuleIndex{
+		Destrules:  destrules,
+		ByHostname: newDestruleIndex(destrules),
+	}
+}
+
 const exportAllNs = "*"
 
 func newDestruleIndex(destRuleCollection krt.Collection[DestinationRuleWrapper]) krt.Index[NsWithHostname, DestinationRuleWrapper] {
-	idx := krtpkg.UnnamedIndex(destRuleCollection, func(d DestinationRuleWrapper) []NsWithHostname {
+	idx := krt.NewIndex(destRuleCollection, func(d DestinationRuleWrapper) []NsWithHostname {
 		exportTo := d.Spec.GetExportTo()
 		if len(exportTo) == 0 {
 			return []NsWithHostname{{

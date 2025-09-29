@@ -3,105 +3,58 @@ package admin
 import (
 	"fmt"
 	"net/http"
-	"sort"
-	"strings"
 
-	// "github.com/kgateway-dev/kgateway/v2/pkg/logging"
-	"github.com/kgateway-dev/kgateway/v2/pkg/logging"
+	"github.com/solo-io/go-utils/contextutils"
 )
 
-// The logging handler allows dynamically changing the log level at runtime.
+// The logging handler is an AtomicLevel that supports dynamically changing the log level at runtime.
 func addLoggingHandler(path string, mux *http.ServeMux, profiles map[string]dynamicProfileDescription) {
-	mux.HandleFunc(path, logging.HTTPLevelHandler)
+	mux.Handle(path, contextutils.GetLogHandler())
 	profiles[path] = getLoggingDescription
+}
+
+// Gets a string representation of the current log level.
+func getLogLevel() string {
+	return contextutils.GetLogLevel().String()
 }
 
 // Gets the html/js to display in the UI for the logging endpoint.
 func getLoggingDescription() string {
-	componentLevels := logging.GetComponentLevels()
+	currentLogLevel := getLogLevel()
 
-	// Build component selector
-	componentSelector := `<select id="componentselector">`
-	// Ensure consistent order for the selector
-	components := make([]string, 0, len(componentLevels))
-	for comp := range componentLevels {
-		components = append(components, comp)
-	}
-	sort.Strings(components) // Sort alphabetically
-
-	for _, comp := range components {
-		componentSelector += fmt.Sprintf(`<option value="%s">%s (Current: %s)</option>`, comp, comp, logging.LevelToString(componentLevels[comp]))
-	}
-	componentSelector += `</select>`
-
-	// Build level selector
-	levelSelector := `<select id="loglevelselector">`
-	supportedLogLevels := []string{"trace", "debug", "info", "warn", "error"}
+	// build the options selector, with the current log level selected by default
+	selectorText := `<select id="loglevelselector">`
+	supportedLogLevels := []string{"debug", "info", "warn", "error"}
 	for _, level := range supportedLogLevels {
-		levelSelector += fmt.Sprintf(`<option value="%s">%s</option>`, level, strings.ToUpper(level))
+		if level == currentLogLevel {
+			selectorText += fmt.Sprintf(`<option value="%s" selected>%s</option>`, level, level)
+		} else {
+			selectorText += fmt.Sprintf(`<option value="%s">%s</option>`, level, level)
+		}
 	}
-	levelSelector += `</select>`
+	selectorText += `</select>`
 
-	// Display current levels
-	currentLevelsDisplay := "<h4>Current Levels:</h4><ul>"
-	for _, comp := range components {
-		currentLevelsDisplay += fmt.Sprintf("<li>%s: %s</li>", comp, logging.LevelToString(componentLevels[comp]))
-	}
-	currentLevelsDisplay += "</ul><hr/>"
+	return `View or change the log level of the program. Note: does not persist across pod restarts.<br/>
 
-	return currentLevelsDisplay + `Set log level for a specific component.<br/>
+Log level:
+` + selectorText + `
 
-Component: ` + componentSelector + `
-Level: ` + levelSelector + `
-
-<button onclick="setlevel()">Set Component Level</button>
-<button onclick="setAllLevels()">Set All Levels</button>
+<button onclick="setlevel(document.getElementById('loglevelselector').value)">Submit</button>
 
 <script>
-function setlevel() {
-	var component = document.getElementById('componentselector').value;
-	var level = document.getElementById('loglevelselector').value;
+function setlevel(l) {
 	var xhr = new XMLHttpRequest();
-	// Use PUT method and construct query parameter as expected by HTTPLevelHandler
-	// Assuming the handler is mounted at /logging
-	var url = '/logging?' + encodeURIComponent(component) + '=' + encodeURIComponent(level);
-	xhr.open('PUT', url, true);
-	// No request body needed for PUT with query params for this handler
+	xhr.open('PUT', '/logging', true);
+	xhr.setRequestHeader("Content-Type", "application/json");
 
 	xhr.onreadystatechange = function() {
-		if (this.readyState == 4) {
-			if (this.status == 200) {
-				alert("Log level for component '" + component + "' set to: " + level + ". Response: " + this.responseText);
-				// Optional: refresh the page or update the display dynamically
-				location.reload(); 
-			} else {
-				alert("Error setting log level for component '" + component + "'. Status: " + this.status + ". Response: " + this.responseText);
-			}
+		if (this.readyState == 4 && this.status == 200) {
+			var resp = JSON.parse(this.responseText);
+			alert("log level set to: " + resp["level"]);
 		}
 	};
 
-	xhr.send();
-}
-
-function setAllLevels() {
-	var level = document.getElementById('loglevelselector').value; // Only need the level
-	var xhr = new XMLHttpRequest();
-	// Construct URL with the global 'level' query parameter
-	var url = '/logging?level=' + encodeURIComponent(level);
-	xhr.open('PUT', url, true);
-
-	xhr.onreadystatechange = function() {
-		if (this.readyState == 4) {
-			if (this.status == 200) {
-				alert("Log level for ALL components set to: " + level + ". Response: " + this.responseText);
-				location.reload(); // Refresh to see updated current levels
-			} else {
-				alert("Error setting log level for all components. Status: " + this.status + ". Response: " + this.responseText);
-			}
-		}
-	};
-
-	xhr.send();
+	xhr.send('{"level":"' + l + '"}');
 }
 </script>
 	`

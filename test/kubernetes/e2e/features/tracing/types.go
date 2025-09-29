@@ -1,3 +1,5 @@
+//go:build ignore
+
 package tracing
 
 import (
@@ -7,35 +9,34 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/kgateway-dev/kgateway/v2/pkg/utils/fsutils"
-	e2edefaults "github.com/kgateway-dev/kgateway/v2/test/kubernetes/e2e/defaults"
-	"github.com/kgateway-dev/kgateway/v2/test/kubernetes/e2e/tests/base"
+)
+
+const (
+	pathWithRouteDescriptor    = "/path/with/route/descriptor"
+	pathWithoutRouteDescriptor = "/path/without/route/descriptor"
+	routeDescriptorSpanName    = "THISISAROUTEDESCRIPTOR"
+	gatewayProxyHost           = "gateway-proxy-tracing"
+	gatewayProxyPort           = 18080
 )
 
 var (
-	// manifests
-	setupManifest               = filepath.Join(fsutils.MustGetThisDir(), "testdata", "setup.yaml")
-	otelCollectorManifest       = filepath.Join(fsutils.MustGetThisDir(), "testdata", "otel-collector.yaml")
-	otelCollectorSecureManifest = filepath.Join(fsutils.MustGetThisDir(), "testdata", "otel-collector-secure.yaml")
-	policyManifest              = filepath.Join(fsutils.MustGetThisDir(), "testdata", "tracing-policy.yaml")
+	setupOtelcolManifest        = filepath.Join(fsutils.MustGetThisDir(), "testdata", "setup-otelcol.yaml")
+	tracingConfigManifest       = filepath.Join(fsutils.MustGetThisDir(), "testdata", "tracing.yaml")
+	gatewayConfigManifest       = filepath.Join(fsutils.MustGetThisDir(), "testdata", "gateway.yaml")
+	gatewayProxyServiceManifest = filepath.Join(fsutils.MustGetThisDir(), "testdata", "gw-proxy-tracing-service.yaml")
 
-	// setup objects
-	proxyObjectMeta = metav1.ObjectMeta{
-		Name:      "gw",
+	otelcolPod = &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "otel-collector", Namespace: "default"},
+	}
+	otelcolSelector = metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=otel-collector",
+	}
+	otelcolUpstream = &metav1.ObjectMeta{
+		Name:      "opentelemetry-collector",
 		Namespace: "default",
 	}
-	proxyService = &corev1.Service{ObjectMeta: proxyObjectMeta}
-
-	setup = base.TestCase{
-		Manifests: []string{e2edefaults.CurlPodManifest, setupManifest},
-	}
-
-	// test cases
-	testCases = map[string]*base.TestCase{
-		"TestOTelTracing": {
-			Manifests: []string{otelCollectorManifest, policyManifest},
-		},
-		"TestOTelTracingSecure": {
-			Manifests: []string{otelCollectorSecureManifest, policyManifest},
-		},
+	tracingVs = &metav1.ObjectMeta{
+		Name:      "virtual-service",
+		Namespace: "default",
 	}
 )

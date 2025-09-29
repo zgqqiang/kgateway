@@ -2,54 +2,49 @@ package translator
 
 import (
 	"context"
-	"log/slog"
 
+	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
 
 	"istio.io/istio/pkg/kube/krt"
 
-	envoyendpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	envoy_config_endpoint_v3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	"github.com/solo-io/go-utils/contextutils"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/endpoints"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/common"
+	extensionsplug "github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/plugin"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/query"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/reports"
 	gwtranslator "github.com/kgateway-dev/kgateway/v2/internal/kgateway/translator/gateway"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/translator/irtranslator"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/utils"
-	"github.com/kgateway-dev/kgateway/v2/pkg/logging"
-	sdk "github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/collections"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/reporter"
-	"github.com/kgateway-dev/kgateway/v2/pkg/reports"
-	"github.com/kgateway-dev/kgateway/v2/pkg/validator"
 )
-
-var logger = logging.New("translator")
 
 // Combines all the translators needed for xDS translation.
 type CombinedTranslator struct {
-	extensions sdk.Plugin
-	commonCols *collections.CommonCollections
-	validator  validator.Validator
+	extensions extensionsplug.Plugin
+	commonCols *common.CommonCollections
 
 	waitForSync []cache.InformerSynced
 
-	gwtranslator      sdk.KGwTranslator
+	gwtranslator      extensionsplug.KGwTranslator
 	irtranslator      *irtranslator.Translator
 	backendTranslator *irtranslator.BackendTranslator
-	endpointPlugins   []sdk.EndpointPlugin
+	endpointPlugins   []extensionsplug.EndpointPlugin
 
-	logger *slog.Logger
+	logger *zap.Logger
 }
 
 func NewCombinedTranslator(
 	ctx context.Context,
-	extensions sdk.Plugin,
-	commonCols *collections.CommonCollections,
-	validator validator.Validator,
+	extensions extensionsplug.Plugin,
+	commonCols *common.CommonCollections,
 ) *CombinedTranslator {
-	var endpointPlugins []sdk.EndpointPlugin
+	var endpointPlugins []extensionsplug.EndpointPlugin
 	for _, ext := range extensions.ContributesPolicies {
 		if ext.PerClientProcessEndpoints != nil {
 			endpointPlugins = append(endpointPlugins, ext.PerClientProcessEndpoints)
@@ -59,30 +54,22 @@ func NewCombinedTranslator(
 		commonCols:      commonCols,
 		extensions:      extensions,
 		endpointPlugins: endpointPlugins,
-		logger:          logger,
-		validator:       validator,
+		logger:          contextutils.LoggerFrom(ctx).Desugar().With(zap.String("component", "translator_syncer")),
 		waitForSync:     []cache.InformerSynced{extensions.HasSynced},
 	}
 }
 
-func (s *CombinedTranslator) Init(ctx context.Context) {
+func (s *CombinedTranslator) Init(ctx context.Context) error {
 	queries := query.NewData(s.commonCols)
 
-	listenerTranslatorConfig := gwtranslator.TranslatorConfig{}
-	listenerTranslatorConfig.ListenerTranslatorConfig.ListenerBindIpv6 = s.commonCols.Settings.ListenerBindIpv6
-
-	s.gwtranslator = gwtranslator.NewTranslator(queries, listenerTranslatorConfig)
+	s.gwtranslator = gwtranslator.NewTranslator(queries)
 	s.irtranslator = &irtranslator.Translator{
-		ContributedPolicies:  s.extensions.ContributesPolicies,
-		RouteReplacementMode: s.commonCols.Settings.RouteReplacementMode,
-		Validator:            s.validator,
+		ContributedPolicies: s.extensions.ContributesPolicies,
 	}
 	s.backendTranslator = &irtranslator.BackendTranslator{
 		ContributedBackends: make(map[schema.GroupKind]ir.BackendInit),
 		ContributedPolicies: s.extensions.ContributesPolicies,
 		CommonCols:          s.commonCols,
-		Validator:           s.validator,
-		Mode:                s.commonCols.Settings.RouteReplacementMode,
 	}
 	for k, up := range s.extensions.ContributesBackends {
 		s.backendTranslator.ContributedBackends[k] = up.BackendInit
@@ -92,6 +79,7 @@ func (s *CombinedTranslator) Init(ctx context.Context) {
 		s.commonCols.HasSynced,
 		s.extensions.HasSynced,
 	)
+	return nil
 }
 
 func (s *CombinedTranslator) HasSynced() bool {
@@ -103,12 +91,11 @@ func (s *CombinedTranslator) HasSynced() bool {
 	return true
 }
 
-// buildProxy performs translation of a kube Gateway -> GatewayIR
-func (s *CombinedTranslator) buildProxy(kctx krt.HandlerContext, ctx context.Context, gw ir.Gateway, r reporter.Reporter) *ir.GatewayIR {
+// buildProxy performs translation of a kube Gateway -> gloov1.Proxy (really a wrapper type)
+func (s *CombinedTranslator) buildProxy(kctx krt.HandlerContext, ctx context.Context, gw ir.Gateway, r reports.Reporter) *ir.GatewayIR {
 	stopwatch := utils.NewTranslatorStopWatch("CombinedTranslator")
 	stopwatch.Start()
-
-	var gatewayTranslator sdk.KGwTranslator = s.gwtranslator
+	var gatewayTranslator extensionsplug.KGwTranslator = s.gwtranslator
 	if s.extensions.ContributesGwTranslator != nil {
 		maybeGatewayTranslator := s.extensions.ContributesGwTranslator(gw.Obj)
 		if maybeGatewayTranslator != nil {
@@ -121,40 +108,54 @@ func (s *CombinedTranslator) buildProxy(kctx krt.HandlerContext, ctx context.Con
 	}
 
 	duration := stopwatch.Stop(ctx)
-	logger.Debug("translated proxy", "namespace", gw.Namespace, "name", gw.Name, "duration", duration.String())
+	contextutils.LoggerFrom(ctx).Debugf("translated proxy %s/%s in %s", gw.Namespace, gw.Name, duration.String())
+
+	// TODO: these are likely unnecessary and should be removed!
+	//	applyPostTranslationPlugins(ctx, pluginRegistry, &gwplugins.PostTranslationContext{
+	//		TranslatedGateways: translatedGateways,
+	//	})
 
 	return proxy
 }
 
-func (s *CombinedTranslator) GetBackendTranslator() *irtranslator.BackendTranslator {
+func (s *CombinedTranslator) GetUpstreamTranslator() *irtranslator.BackendTranslator {
 	return s.backendTranslator
 }
 
 // ctx needed for logging; remove once we refactor logging.
 func (s *CombinedTranslator) TranslateGateway(kctx krt.HandlerContext, ctx context.Context, gw ir.Gateway) (*irtranslator.TranslationResult, reports.ReportMap) {
+	logger := contextutils.LoggerFrom(ctx)
+
 	rm := reports.NewReportMap()
 	r := reports.NewReporter(&rm)
-	logger.Debug("translating Gateway", "resource_ref", gw.ResourceName(), "resource_version", gw.Obj.GetResourceVersion())
-
+	logger.Debugf("building proxy for kube gw %s version %s", client.ObjectKeyFromObject(gw.Obj), gw.Obj.GetResourceVersion())
 	gwir := s.buildProxy(kctx, ctx, gw, r)
+
 	if gwir == nil {
 		return nil, reports.ReportMap{}
 	}
 
 	// we are recomputing xds snapshots as proxies have changed, signal that we need to sync xds with these new snapshots
-	xdsSnap := s.irtranslator.Translate(ctx, *gwir, r)
+	xdsSnap := s.irtranslator.Translate(*gwir, r)
 
 	return &xdsSnap, rm
 }
 
-func (s *CombinedTranslator) TranslateEndpoints(kctx krt.HandlerContext, ucc ir.UniqlyConnectedClient, ep ir.EndpointsForBackend) (*envoyendpointv3.ClusterLoadAssignment, uint64) {
-	epInputs := endpoints.EndpointsInputs{
-		EndpointsForBackend: ep,
+func (s *CombinedTranslator) TranslateEndpoints(kctx krt.HandlerContext, ucc ir.UniqlyConnectedClient, ep ir.EndpointsForBackend) (*envoy_config_endpoint_v3.ClusterLoadAssignment, uint64) {
+	// check if we have a plugin to do it
+	cla, additionalHash := proccessWithPlugins(s.endpointPlugins, kctx, context.TODO(), ucc, ep)
+	if cla != nil {
+		return cla, additionalHash
 	}
-	var hash uint64
-	for _, processEndpoints := range s.endpointPlugins {
-		additionalHash := processEndpoints(kctx, context.TODO(), ucc, &epInputs)
-		hash ^= additionalHash
+	return endpoints.PrioritizeEndpoints(s.logger, nil, ep, ucc), 0
+}
+
+func proccessWithPlugins(plugins []extensionsplug.EndpointPlugin, kctx krt.HandlerContext, ctx context.Context, ucc ir.UniqlyConnectedClient, in ir.EndpointsForBackend) (*envoy_config_endpoint_v3.ClusterLoadAssignment, uint64) {
+	for _, processEnddpoints := range plugins {
+		cla, additionalHash := processEnddpoints(kctx, context.TODO(), ucc, in)
+		if cla != nil {
+			return cla, additionalHash
+		}
 	}
-	return endpoints.PrioritizeEndpoints(s.logger, ucc, epInputs), hash
+	return nil, 0
 }

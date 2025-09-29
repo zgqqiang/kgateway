@@ -5,19 +5,7 @@ import (
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-// Select the object by Name and Namespace.
-// You can target only one object at a time.
-type NamespacedObjectReference struct {
-	// The name of the target resource.
-	Name gwv1.ObjectName `json:"name"`
-
-	// The namespace of the target resource.
-	// If not set, defaults to the namespace of the parent object.
-	// +optional
-	Namespace *gwv1.Namespace `json:"namespace,omitempty"`
-}
-
-// Select the object to attach the policy by Group, Kind, and Name.
+// Select the object to attach the policy to.
 // The object must be in the same namespace as the policy.
 // You can target only one object at a time.
 type LocalPolicyTargetReference struct {
@@ -31,50 +19,6 @@ type LocalPolicyTargetReference struct {
 
 	// The name of the target resource.
 	Name gwv1.ObjectName `json:"name"`
-}
-
-// Select the object to attach the policy by Group, Kind, Name and SectionName.
-// The object must be in the same namespace as the policy.
-// You can target only one object at a time.
-type LocalPolicyTargetReferenceWithSectionName struct {
-	LocalPolicyTargetReference `json:",inline"`
-
-	// The section name of the target resource.
-	// +optional
-	SectionName *gwv1.SectionName `json:"sectionName,omitempty"`
-}
-
-// LocalPolicyTargetSelector selects the object to attach the policy by Group, Kind, and MatchLabels.
-// The object must be in the same namespace as the policy and match the
-// specified labels.
-// Do not use targetSelectors when reconciliation times are critical, especially if you
-// have a large number of policies that target the same resource.
-// Instead, use targetRefs to attach the policy.
-type LocalPolicyTargetSelector struct {
-	// The API group of the target resource.
-	// For Kubernetes Gateway API resources, the group is `gateway.networking.k8s.io`.
-	Group gwv1.Group `json:"group"`
-
-	// The API kind of the target resource,
-	// such as Gateway or HTTPRoute.
-	Kind gwv1.Kind `json:"kind"`
-
-	// Label selector to select the target resource.
-	MatchLabels map[string]string `json:"matchLabels"`
-}
-
-// LocalPolicyTargetSelectorWithSectionName the object to attach the policy by Group, Kind, MatchLabels, and optionally SectionName.
-// The object must be in the same namespace as the policy and match the
-// specified labels.
-// Do not use targetSelectors when reconciliation times are critical, especially if you
-// have a large number of policies that target the same resource.
-// Instead, use targetRefs to attach the policy.
-type LocalPolicyTargetSelectorWithSectionName struct {
-	LocalPolicyTargetSelector `json:",inline"`
-
-	// The section name of the target resource.
-	// +optional
-	SectionName *gwv1.SectionName `json:"sectionName,omitempty"`
 }
 
 type PolicyStatus struct {
@@ -116,37 +60,4 @@ type PolicyAncestorStatus struct {
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=8
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
-}
-
-// Specifies the way to match a string.
-// +kubebuilder:validation:ExactlyOneOf=exact;prefix;suffix;contains;safeRegex
-type StringMatcher struct {
-	// The input string must match exactly the string specified here.
-	// Example: abc matches the value abc
-	Exact *string `json:"exact,omitempty"`
-
-	// The input string must have the prefix specified here.
-	// Note: empty prefix is not allowed, please use regex instead.
-	// Example: abc matches the value abc.xyz
-	Prefix *string `json:"prefix,omitempty"`
-
-	// The input string must have the suffix specified here.
-	// Note: empty prefix is not allowed, please use regex instead.
-	// Example: abc matches the value xyz.abc
-	Suffix *string `json:"suffix,omitempty"`
-
-	// The input string must contain the substring specified here.
-	// Example: abc matches the value xyz.abc.def
-	Contains *string `json:"contains,omitempty"`
-
-	// The input string must match the Google RE2 regular expression specified here.
-	// See https://github.com/google/re2/wiki/Syntax for the syntax.
-	SafeRegex *string `json:"safeRegex,omitempty"`
-
-	// If true, indicates the exact/prefix/suffix/contains matching should be
-	// case insensitive. This has no effect on the regex match.
-	// For example, the matcher data will match both input string Data and data if this
-	// option is set to true.
-	// +kubebuilder:default=false
-	IgnoreCase bool `json:"ignoreCase"`
 }

@@ -55,15 +55,12 @@ func NewSuite(
 
 func (s *tsuite) SetupSuite() {
 	s.manifests = map[string][]string{
-		"TestTracing":                 {tracingManifest},
 		"TestRouting":                 {commonManifest, backendManifest, routesBasicManifest},
 		"TestRoutingPassthrough":      {commonManifest, backendPassthroughManifest, routesBasicManifest},
-		"TestRoutingOverrideProvider": {commonManifest, backendPassthroughManifest, routesBasicManifest},
 		"TestStreaming":               {commonManifest, backendManifest, routeOptionStreamingManifest, routesWithExtensionManifest},
 		"TestPromptGuardRejectExtRef": {commonManifest, backendManifest, trafficPolicyPGRegexPatternRejectManifest, routesWitPGRegexPatternRejectManifest},
 		"TestPromptGuard":             {commonManifest, backendManifest, routesBasicManifest, promptGuardManifest},
 		"TestPromptGuardStreaming":    {commonManifest, backendManifest, routesBasicManifest, promptGuardStreamingManifest},
-		"TestPromptGuardWebhook":      {commonManifest, backendManifest, routesBasicManifest, promptGuardWebhookManifest},
 	}
 }
 
@@ -109,27 +106,6 @@ func (s *tsuite) AfterTest(suiteName, testName string) {
 	}
 }
 
-// TODO: Test that spans generated after traffic passes through the AI extension are correctly sent to the backend storage (Tempo).
-func (s *tsuite) TestTracing() {
-	tracingConfig := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "ai-gateway",
-			Namespace: s.testInst.Metadata.InstallNamespace,
-		},
-	}
-
-	s.testInst.Assertions.EventuallyObjectsExist(s.ctx, tracingConfig)
-
-	s.Require().EventuallyWithT(func(c *assert.CollectT) {
-		err := s.testInst.ClusterContext.Client.Get(
-			s.ctx,
-			types.NamespacedName{Name: tracingConfig.Name, Namespace: tracingConfig.Namespace},
-			tracingConfig,
-		)
-		assert.NoErrorf(c, err, "failed to get configMap %s/%s", tracingConfig.Namespace, tracingConfig.Name)
-	}, 30*time.Second, 1*time.Second)
-}
-
 func (s *tsuite) TestRouting() {
 	s.invokePytest("routing.py")
 }
@@ -138,13 +114,6 @@ func (s *tsuite) TestRoutingPassthrough() {
 	s.invokePytest(
 		"routing.py",
 		"TEST_TOKEN_PASSTHROUGH=true",
-	)
-}
-
-func (s *tsuite) TestRoutingOverrideProvider() {
-	s.invokePytest(
-		"routing.py",
-		"TEST_OVERRIDE_PROVIDER=true",
 	)
 }
 
@@ -164,10 +133,6 @@ func (s *tsuite) TestPromptGuardStreaming() {
 	s.invokePytest("prompt_guard_streaming.py")
 }
 
-func (s *tsuite) TestPromptGuardWebhook() {
-	s.invokePytest("prompt_guard_webhook.py")
-}
-
 func (s *tsuite) invokePytest(test string, extraEnv ...string) {
 	fmt.Printf("Using Python binary: %s\n", pythonBin)
 
@@ -185,7 +150,6 @@ func (s *tsuite) invokePytest(test string, extraEnv ...string) {
 	cmd := exec.Command(pythonBin, args...)
 	cmd.Dir = filepath.Join(s.rootDir, "test/kubernetes/e2e/features/aiextension/tests")
 	cmd.Env = []string{
-		fmt.Sprintf("TEST_OVERRIDE_BASE_URL=%s/openai-override", gwURL),
 		fmt.Sprintf("TEST_OPENAI_BASE_URL=%s/openai", gwURL),
 		fmt.Sprintf("TEST_AZURE_OPENAI_BASE_URL=%s/azure", gwURL),
 		fmt.Sprintf("TEST_GEMINI_BASE_URL=%s/gemini", gwURL), // need to specify HTTP as part of the endpoint

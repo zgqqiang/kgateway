@@ -42,9 +42,14 @@ metadata:
 spec:
   containers:
     - name: curl
-      image: ghcr.io/kgateway-dev/curl:7.83.1
+      image: curlimages/curl:7.83.1
       imagePullPolicy: IfNotPresent
       command:
         - "tail"
         - "-f"
         - "/dev/null"
+      resources:
+        requests:
+          cpu: "100m"
+        limits:
+          cpu: "200m"

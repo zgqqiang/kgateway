@@ -3,8 +3,8 @@ package proxy_syncer_test
 import (
 	"testing"
 
-	envoycorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	envoyendpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 
@@ -22,11 +22,11 @@ func TestTranslatesDestrulesFailoverPriority(t *testing.T) {
 	}
 	efu := ir.NewEndpointsForBackend(us)
 	efu.Add(ir.PodLocality{Region: "R1"}, ir.EndpointWithMd{
-		LbEndpoint: &envoyendpointv3.LbEndpoint{
-			HostIdentifier: &envoyendpointv3.LbEndpoint_Endpoint{
-				Endpoint: &envoyendpointv3.Endpoint{
-					Address: &envoycorev3.Address{
-						Address: &envoycorev3.Address_Pipe{Pipe: &envoycorev3.Pipe{Path: "a"}},
+		LbEndpoint: &endpointv3.LbEndpoint{
+			HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
+				Endpoint: &endpointv3.Endpoint{
+					Address: &corev3.Address{
+						Address: &corev3.Address_Pipe{Pipe: &corev3.Pipe{Path: "a"}},
 					},
 				},
 			},
@@ -36,11 +36,11 @@ func TestTranslatesDestrulesFailoverPriority(t *testing.T) {
 		},
 	})
 	efu.Add(ir.PodLocality{Region: "R2"}, ir.EndpointWithMd{
-		LbEndpoint: &envoyendpointv3.LbEndpoint{
-			HostIdentifier: &envoyendpointv3.LbEndpoint_Endpoint{
-				Endpoint: &envoyendpointv3.Endpoint{
-					Address: &envoycorev3.Address{
-						Address: &envoycorev3.Address_Pipe{Pipe: &envoycorev3.Pipe{Path: "b"}},
+		LbEndpoint: &endpointv3.LbEndpoint{
+			HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
+				Endpoint: &endpointv3.Endpoint{
+					Address: &corev3.Address{
+						Address: &corev3.Address_Pipe{Pipe: &corev3.Pipe{Path: "b"}},
 					},
 				},
 			},
@@ -61,11 +61,7 @@ func TestTranslatesDestrulesFailoverPriority(t *testing.T) {
 		}),
 	}
 
-	epInputs := endpoints.EndpointsInputs{
-		EndpointsForBackend: *efu,
-		PriorityInfo:        priorityInfo,
-	}
-	cla := endpoints.PrioritizeEndpoints(nil, ucc, epInputs)
+	cla := endpoints.PrioritizeEndpoints(nil, priorityInfo, *efu, ucc)
 	g.Expect(cla.Endpoints).To(gomega.HaveLen(2))
 
 	remoteLocality := cla.Endpoints[0]
@@ -92,11 +88,11 @@ func TestTranslatesDestrulesFailover(t *testing.T) {
 	}
 	efu := ir.NewEndpointsForBackend(us)
 	efu.Add(ir.PodLocality{Region: "R1"}, ir.EndpointWithMd{
-		LbEndpoint: &envoyendpointv3.LbEndpoint{
-			HostIdentifier: &envoyendpointv3.LbEndpoint_Endpoint{
-				Endpoint: &envoyendpointv3.Endpoint{
-					Address: &envoycorev3.Address{
-						Address: &envoycorev3.Address_Pipe{Pipe: &envoycorev3.Pipe{Path: "a"}},
+		LbEndpoint: &endpointv3.LbEndpoint{
+			HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
+				Endpoint: &endpointv3.Endpoint{
+					Address: &corev3.Address{
+						Address: &corev3.Address_Pipe{Pipe: &corev3.Pipe{Path: "a"}},
 					},
 				},
 			},
@@ -106,11 +102,11 @@ func TestTranslatesDestrulesFailover(t *testing.T) {
 		},
 	})
 	efu.Add(ir.PodLocality{Region: "R2"}, ir.EndpointWithMd{
-		LbEndpoint: &envoyendpointv3.LbEndpoint{
-			HostIdentifier: &envoyendpointv3.LbEndpoint_Endpoint{
-				Endpoint: &envoyendpointv3.Endpoint{
-					Address: &envoycorev3.Address{
-						Address: &envoycorev3.Address_Pipe{Pipe: &envoycorev3.Pipe{Path: "b"}},
+		LbEndpoint: &endpointv3.LbEndpoint{
+			HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
+				Endpoint: &endpointv3.Endpoint{
+					Address: &corev3.Address{
+						Address: &corev3.Address_Pipe{Pipe: &corev3.Pipe{Path: "b"}},
 					},
 				},
 			},
@@ -127,11 +123,7 @@ func TestTranslatesDestrulesFailover(t *testing.T) {
 
 	priorityInfo := &endpoints.PriorityInfo{}
 
-	epInputs := endpoints.EndpointsInputs{
-		EndpointsForBackend: *efu,
-		PriorityInfo:        priorityInfo,
-	}
-	cla := endpoints.PrioritizeEndpoints(nil, ucc, epInputs)
+	cla := endpoints.PrioritizeEndpoints(nil, priorityInfo, *efu, ucc)
 	g.Expect(cla.Endpoints).To(gomega.HaveLen(2))
 
 	remoteLocality := cla.Endpoints[0]

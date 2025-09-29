@@ -2,10 +2,8 @@ package assertions
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -46,15 +44,7 @@ func (p *Provider) AssertEventualCurlReturnResponse(
 	p.Gomega.Eventually(func(g Gomega) {
 		curlResponse, err := p.clusterContext.Cli.CurlFromPod(ctx, podOpts, curlOptions...)
 		fmt.Printf("want:\n%+v\nstdout:\n%s\nstderr:%s\n\n", expectedResponse, curlResponse.StdOut, curlResponse.StdErr)
-		// Ignore certain errors that are expected to occur when the curl command times out
-		if err != nil {
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) && exitErr.ExitCode() == expectedResponse.IgnoreExitCode {
-				fmt.Printf("Ignoring curl exit code %d: %v\n", expectedResponse.IgnoreExitCode, err)
-			} else {
-				g.Expect(err).NotTo(HaveOccurred())
-			}
-		}
+		g.Expect(err).NotTo(HaveOccurred())
 
 		// Do the transform in a separate step instead of a WithTransform to avoid having to do it twice
 		//nolint:bodyclose // The caller of this assertion should be responsible for ensuring the body close - if the response is not needed for the test, AssertEventualCurlResponse should be used instead
@@ -82,7 +72,7 @@ func (p *Provider) AssertEventualCurlResponse(
 	resp.Body.Close()
 }
 
-func (p *Provider) assertCurlReturnResponse(
+func (p *Provider) AssertCurlReturnResponse(
 	ctx context.Context,
 	podOpts kubectl.PodExecOptions,
 	curlOptions []curl.Option,
@@ -98,16 +88,7 @@ func (p *Provider) assertCurlReturnResponse(
 	// Rely on default timeouts set in CurlFromPod
 	curlResponse, err := p.clusterContext.Cli.CurlFromPod(ctx, podOpts, curlOptions...)
 	fmt.Printf("want:\n%+v\nstdout:\n%s\nstderr:%s\n\n", expectedResponse, curlResponse.StdOut, curlResponse.StdErr)
-
-	// Ignore certain errors that are expected to occur when the curl command times out
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == expectedResponse.IgnoreExitCode {
-			fmt.Printf("Ignoring curl exit code %d: %v\n", expectedResponse.IgnoreExitCode, err)
-		} else {
-			Expect(err).NotTo(HaveOccurred())
-		}
-	}
+	Expect(err).NotTo(HaveOccurred())
 
 	// Do the transform in a separate step instead of a WithTransform to avoid having to do it twice
 	curlHttpResponse := transforms.WithCurlResponse(curlResponse)
@@ -117,13 +98,13 @@ func (p *Provider) assertCurlReturnResponse(
 	return curlHttpResponse
 }
 
-func (p *Provider) assertCurlResponse(
+func (p *Provider) AssertCurlResponse(
 	ctx context.Context,
 	podOpts kubectl.PodExecOptions,
 	curlOptions []curl.Option,
 	expectedResponse *matchers.HttpResponse,
 ) {
-	resp := p.assertCurlReturnResponse(ctx, podOpts, curlOptions, expectedResponse)
+	resp := p.AssertCurlReturnResponse(ctx, podOpts, curlOptions, expectedResponse)
 	resp.Body.Close()
 }
 
@@ -145,7 +126,13 @@ func (p *Provider) AssertEventuallyConsistentCurlResponse(
 	}
 
 	p.Gomega.Consistently(func(g Gomega) {
-		p.assertCurlResponse(ctx, podOpts, curlOptions, expectedResponse)
+		res, err := p.clusterContext.Cli.CurlFromPod(ctx, podOpts, curlOptions...)
+		fmt.Printf("want:\n%+v\nstdout:\n%s\nstderr:%s\n\n", expectedResponse, res.StdOut, res.StdErr)
+		g.Expect(err).NotTo(HaveOccurred())
+
+		expectedResponseMatcher := WithTransform(transforms.WithCurlResponse, matchers.HaveHttpResponse(expectedResponse))
+		g.Expect(res).To(expectedResponseMatcher)
+		fmt.Printf("success: %+v", res)
 	}).
 		WithTimeout(pollTimeout).
 		WithPolling(pollInterval).
@@ -210,7 +197,7 @@ func (p *Provider) AssertEventualCurlError(
 }
 
 func (p *Provider) generateCurlOpts(host string) []curl.Option {
-	curlOpts := []curl.Option{
+	var curlOpts = []curl.Option{
 		curl.WithHost(kubeutils.ServiceFQDN(metav1.ObjectMeta{Name: GatewayProxyName, Namespace: p.installContext.InstallNamespace})),
 		curl.WithPort(80),
 		curl.Silent(),
@@ -280,7 +267,7 @@ func (p *Provider) CurlEventuallyRespondsWithStatus(ctx context.Context, host st
 func (p *Provider) CurlRespondsWithStatus(ctx context.Context, host string, status int) {
 	curlOptsHeader := p.generateCurlOpts(host)
 
-	p.assertCurlResponse(
+	p.AssertCurlResponse(
 		ctx,
 		e2edefaults.CurlPodExecOpt,
 		curlOptsHeader,
@@ -315,7 +302,7 @@ func (p *Provider) CurlWithHeadersEventuallyRespondsWithStatus(ctx context.Conte
 func (p *Provider) CurlWithHeadersRespondsWithStatus(ctx context.Context, host string, headers map[string]string, status int) {
 	curlOptsHeader := p.generateCurlOptsWithHeaders(host, headers)
 
-	p.assertCurlResponse(
+	p.AssertCurlResponse(
 		ctx,
 		e2edefaults.CurlPodExecOpt,
 		curlOptsHeader,

@@ -10,8 +10,6 @@ var (
 	// common setup manifest (Gateway and Curl pod)
 	commonManifest = filepath.Join(fsutils.MustGetThisDir(), "testdata", "common.yaml")
 
-	tracingManifest = filepath.Join(fsutils.MustGetThisDir(), "testdata", "tracing.yaml")
-
 	// backends with Token Auth
 	backendManifest = filepath.Join(fsutils.MustGetThisDir(), "testdata", "backend-token.yaml")
 
@@ -38,7 +36,4 @@ var (
 
 	// prompt guard (streaming response) on the routes
 	promptGuardStreamingManifest = filepath.Join(fsutils.MustGetThisDir(), "testdata", "prompt-guard-streaming.yaml")
-
-	// prompt guard webhook on the routes
-	promptGuardWebhookManifest = filepath.Join(fsutils.MustGetThisDir(), "testdata", "prompt-guard-webhook.yaml")
 )

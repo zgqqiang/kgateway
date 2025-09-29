@@ -1,49 +1,27 @@
 package endpoints
 
 import (
-	"log/slog"
 	"sort"
 	"strings"
 
-	"istio.io/api/label"
+	"go.uber.org/zap"
 	"istio.io/api/networking/v1alpha3"
-	"istio.io/istio/pkg/slices"
-
-	corev1 "k8s.io/api/core/v1"
 
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/wellknown"
 
-	envoycorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	envoyendpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	envoy_config_endpoint_v3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
-// EndpointsInputs is the collective IR that can be modified
-// by endpoint plugins to influence the ClusterLoadAssignment.
-type EndpointsInputs struct {
-	EndpointsForBackend ir.EndpointsForBackend
-	PriorityInfo        *PriorityInfo
-}
-
-// PrioritizeEndpoints converts EndpointsInputs into a ClusterLoadAssignment.
-func PrioritizeEndpoints(
-	logger *slog.Logger,
-	ucc ir.UniqlyConnectedClient,
-	inputs EndpointsInputs,
-) *envoyendpointv3.ClusterLoadAssignment {
+func PrioritizeEndpoints(logger *zap.Logger, priorityInfo *PriorityInfo, ep ir.EndpointsForBackend, ucc ir.UniqlyConnectedClient) *envoy_config_endpoint_v3.ClusterLoadAssignment {
 	lbInfo := LoadBalancingInfo{
-		PodLabels:   ucc.Labels,
-		PodLocality: ucc.Locality,
+		PodLabels:    ucc.Labels,
+		PodLocality:  ucc.Locality,
+		PriorityInfo: priorityInfo,
 	}
 
-	if inputs.PriorityInfo == nil {
-		lbInfo.PriorityInfo = priorityInfoFromTrafficDistribution(inputs.EndpointsForBackend.TrafficDistribution)
-	} else {
-		lbInfo.PriorityInfo = inputs.PriorityInfo
-	}
-
-	return prioritizeWithLbInfo(logger, inputs.EndpointsForBackend, lbInfo)
+	return prioritizeWithLbInfo(logger, ep, lbInfo)
 }
 
 type LoadBalancingInfo struct {
@@ -113,22 +91,20 @@ func priorityLabelOverrides(labels []string) ([]string, map[string]string) {
 	return priorityLabels, overriddenValueByLabel
 }
 
-func prioritizeWithLbInfo(logger *slog.Logger, ep ir.EndpointsForBackend, lbInfo LoadBalancingInfo) *envoyendpointv3.ClusterLoadAssignment {
-	cla := &envoyendpointv3.ClusterLoadAssignment{
+func prioritizeWithLbInfo(logger *zap.Logger, ep ir.EndpointsForBackend, lbInfo LoadBalancingInfo) *envoy_config_endpoint_v3.ClusterLoadAssignment {
+	cla := &envoy_config_endpoint_v3.ClusterLoadAssignment{
 		ClusterName: ep.ClusterName,
 	}
 	totalEndpoints := 0
 	for loc, eps := range ep.LbEps {
-		var l *envoycorev3.Locality
+		var l *envoy_config_core_v3.Locality
 		if loc != (ir.PodLocality{}) {
-			l = &envoycorev3.Locality{
+			l = &envoy_config_core_v3.Locality{
 				Region:  loc.Region,
 				Zone:    loc.Zone,
 				SubZone: loc.Subzone,
 			}
 		}
-
-		eps = filterInvalidEps(eps)
 
 		endpoints := getEndpoints(eps, lbInfo)
 		for _, ep := range endpoints {
@@ -141,7 +117,7 @@ func prioritizeWithLbInfo(logger *slog.Logger, ep ir.EndpointsForBackend, lbInfo
 
 	if lbInfo.PriorityInfo != nil && lbInfo.PriorityInfo.FailoverPriority == nil {
 		// if no priorities, fallback to failover
-		proxyLocality := envoycorev3.Locality{
+		proxyLocality := envoy_config_core_v3.Locality{
 			Region:  lbInfo.PodLocality.Region,
 			Zone:    lbInfo.PodLocality.Zone,
 			SubZone: lbInfo.PodLocality.Subzone,
@@ -149,7 +125,7 @@ func prioritizeWithLbInfo(logger *slog.Logger, ep ir.EndpointsForBackend, lbInfo
 		applyLocalityFailover(&proxyLocality, cla, lbInfo.PriorityInfo.Failover)
 	}
 	if logger != nil {
-		logger.Debug("created cla", "cluster", cla.GetClusterName(), "total_endpoints", totalEndpoints)
+		logger.Debug("created cla", zap.String("cluster", cla.GetClusterName()), zap.Int("numAddresses", totalEndpoints))
 	}
 
 	// in theory we want to run endpoint plugins here.
@@ -158,23 +134,12 @@ func prioritizeWithLbInfo(logger *slog.Logger, ep ir.EndpointsForBackend, lbInfo
 	return cla
 }
 
-// ensure we don't send invalid endpoints to envoy and cause NACKs
-func filterInvalidEps(eps []ir.EndpointWithMd) []ir.EndpointWithMd {
-	return slices.Filter(eps, func(ewm ir.EndpointWithMd) bool {
-		sock := ewm.GetEndpoint().GetAddress().GetSocketAddress()
-		if sock != nil && sock.GetAddress() == "" {
-			return false
-		}
-		return true
-	})
-}
-
-func getEndpoints(eps []ir.EndpointWithMd, lbinfo LoadBalancingInfo) []*envoyendpointv3.LocalityLbEndpoints {
+func getEndpoints(eps []ir.EndpointWithMd, lbinfo LoadBalancingInfo) []*envoy_config_endpoint_v3.LocalityLbEndpoints {
 	if lbinfo.PriorityInfo != nil && lbinfo.PriorityInfo.FailoverPriority != nil {
 		return applyFailoverPriorityPerLocality(eps, lbinfo)
 	}
-	epsOut := []*envoyendpointv3.LocalityLbEndpoints{{
-		LbEndpoints: make([]*envoyendpointv3.LbEndpoint, 0, len(eps)),
+	epsOut := []*envoy_config_endpoint_v3.LocalityLbEndpoints{{
+		LbEndpoints: make([]*envoy_config_endpoint_v3.LbEndpoint, 0, len(eps)),
 	}}
 
 	var weight uint32
@@ -194,7 +159,7 @@ func getEndpoints(eps []ir.EndpointWithMd, lbinfo LoadBalancingInfo) []*envoyend
 
 func applyFailoverPriorityPerLocality(
 	eps []ir.EndpointWithMd, lbinfo LoadBalancingInfo,
-) []*envoyendpointv3.LocalityLbEndpoints {
+) []*envoy_config_endpoint_v3.LocalityLbEndpoints {
 	// key is priority, value is the index of LocalityLbEndpoints.LbEndpoints
 	priorityMap := map[int][]int{}
 	for i, ep := range eps {
@@ -209,10 +174,10 @@ func applyFailoverPriorityPerLocality(
 	}
 	sort.Ints(priorities)
 
-	out := make([]*envoyendpointv3.LocalityLbEndpoints, len(priorityMap))
+	out := make([]*envoy_config_endpoint_v3.LocalityLbEndpoints, len(priorityMap))
 	for i, priority := range priorities {
-		out[i] = &envoyendpointv3.LocalityLbEndpoints{}
-		out[i].Priority = uint32(priority) //nolint:gosec // G115: priority is bounded by locality failover (0-4)
+		out[i] = &envoy_config_endpoint_v3.LocalityLbEndpoints{}
+		out[i].Priority = uint32(priority)
 		var weight uint32
 		for _, index := range priorityMap[priority] {
 			out[i].LbEndpoints = append(out[i].GetLbEndpoints(), eps[index].LbEndpoint)
@@ -233,8 +198,8 @@ func applyFailoverPriorityPerLocality(
 // and if we do, make sure that it works correctly with connected client set
 // set locality loadbalancing priority - This is based on Region/Zone/SubZone matching.
 func applyLocalityFailover(
-	proxyLocality *envoycorev3.Locality,
-	loadAssignment *envoyendpointv3.ClusterLoadAssignment,
+	proxyLocality *envoy_config_core_v3.Locality,
+	loadAssignment *envoy_config_endpoint_v3.ClusterLoadAssignment,
 	failover []*v1alpha3.LocalityLoadBalancerSetting_Failover,
 ) {
 	// key is priority, value is the index of the LocalityLbEndpoints in ClusterLoadAssignment
@@ -264,7 +229,7 @@ func applyLocalityFailover(
 		// we multiply the priority by 5 for maintaining the priorities already assigned.
 		// Afterwards the final priorities can be calculted from 0 (highest) to N (lowest) without skipping.
 		priorityInt := int(loadAssignment.GetEndpoints()[i].GetPriority()*5) + priority
-		loadAssignment.GetEndpoints()[i].Priority = uint32(priorityInt) //nolint:gosec // G115: priorityInt is calculated from bounded locality priorities
+		loadAssignment.GetEndpoints()[i].Priority = uint32(priorityInt)
 		priorityMap[priorityInt] = append(priorityMap[priorityInt], i)
 	}
 
@@ -282,13 +247,13 @@ func applyLocalityFailover(
 		if i != priority {
 			// the LocalityLbEndpoints index in ClusterLoadAssignment.Endpoints
 			for _, index := range priorityMap[priority] {
-				loadAssignment.GetEndpoints()[index].Priority = uint32(i) //nolint:gosec // G115: i is array index, always non-negative
+				loadAssignment.GetEndpoints()[index].Priority = uint32(i)
 			}
 		}
 	}
 }
 
-func LbPriority(proxyLocality, endpointsLocality *envoycorev3.Locality) int {
+func LbPriority(proxyLocality, endpointsLocality *envoy_config_core_v3.Locality) int {
 	if proxyLocality.GetRegion() == endpointsLocality.GetRegion() {
 		if proxyLocality.GetZone() == endpointsLocality.GetZone() {
 			if proxyLocality.GetSubZone() == endpointsLocality.GetSubZone() {
@@ -299,37 +264,4 @@ func LbPriority(proxyLocality, endpointsLocality *envoycorev3.Locality) int {
 		return 2
 	}
 	return 3
-}
-
-// priorityInfoFromTrafficDistribution provides PriorityInfo with failover priorities based on the provided
-// traffic distribution.
-// If the traffic distribution is Any, the returned PriorityInfo is nil.
-func priorityInfoFromTrafficDistribution(trafficDistribution wellknown.TrafficDistribution) *PriorityInfo {
-	var priorities *Prioritizer
-	switch trafficDistribution {
-	case wellknown.TrafficDistributionPreferSameZone:
-		priorities = NewPriorities([]string{
-			label.TopologyNetwork.Name,
-			corev1.LabelZoneRegion,
-			corev1.LabelTopologyZone,
-		})
-	case wellknown.TrafficDistributionPreferSameNode:
-		priorities = NewPriorities([]string{
-			label.TopologyNetwork.Name,
-			corev1.LabelZoneRegion,
-			corev1.LabelTopologyZone,
-			label.TopologySubzone.Name,
-			corev1.LabelHostname,
-		})
-	case wellknown.TrafficDistributionPreferSameNetwork:
-		priorities = NewPriorities([]string{
-			label.TopologyNetwork.Name,
-		})
-	}
-	if priorities != nil {
-		return &PriorityInfo{
-			FailoverPriority: priorities,
-		}
-	}
-	return nil
 }

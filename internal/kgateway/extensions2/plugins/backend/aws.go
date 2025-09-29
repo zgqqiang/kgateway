@@ -1,14 +1,15 @@
 package backend
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
 	"unicode/utf8"
 
-	envoyclusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
-	envoycorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	envoy_config_cluster_v3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	envoy_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	envoy_aws_common_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/common/aws/v3"
 	envoy_lambda_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/aws_lambda/v3"
 	envoy_request_signing_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/aws_request_signing/v3"
@@ -24,12 +25,16 @@ import (
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
 	translatorutils "github.com/kgateway-dev/kgateway/v2/internal/kgateway/translator/utils"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/utils"
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/wellknown"
 	"github.com/kgateway-dev/kgateway/v2/pkg/utils/arnutils"
-	"github.com/kgateway-dev/kgateway/v2/pkg/utils/cmputils"
 )
 
 const (
+	// accessKey is the key name for in the secret data for the access key id.
+	accessKey = "accessKey"
+	// sessionToken is the key name for in the secret data for the session token.
+	sessionToken = "sessionToken"
+	// secretKey is the key name for in the secret data for the secret access key.
+	secretKey = "secretKey"
 	// lambdaServiceName is the service name for the lambda filter.
 	lambdaServiceName = "lambda"
 	// lambdaFilterName is the name of the lambda filter.
@@ -38,13 +43,15 @@ const (
 	awsRequestSigningFilterName = "envoy.filters.http.aws_request_signing"
 	// upstreamCodecFilterName is the name of the upstream codec filter.
 	upstreamCodecFilterName = "envoy.filters.http.upstream_codec"
+	// defaultAWSRegion is the default AWS region.
+	defaultAWSRegion = "us-east-1"
 )
 
 // AwsIr is the internal representation of an AWS backend.
 type AwsIr struct {
 	lambdaFilters         *lambdaFilters
 	lambdaEndpoint        *lambdaEndpointConfig
-	lambdaTransportSocket *envoycorev3.TransportSocket
+	lambdaTransportSocket *envoy_core_v3.TransportSocket
 }
 
 // Equals checks if two AwsIr objects are equal.
@@ -74,14 +81,14 @@ func (u *AwsIr) Equals(other any) bool {
 }
 
 // processAws processes an AWS backend and returns an envoy cluster.
-func processAws(ir *AwsIr, out *envoyclusterv3.Cluster) error {
+func processAws(ctx context.Context, in *v1alpha1.AwsBackend, ir *AwsIr, out *envoy_config_cluster_v3.Cluster) error {
 	// defensive check; this should never happen with union types
 	if ir == nil {
 		return fmt.Errorf("aws ir is nil")
 	}
 
-	out.ClusterDiscoveryType = &envoyclusterv3.Cluster_Type{
-		Type: envoyclusterv3.Cluster_LOGICAL_DNS,
+	out.ClusterDiscoveryType = &envoy_config_cluster_v3.Cluster_Type{
+		Type: envoy_config_cluster_v3.Cluster_LOGICAL_DNS,
 	}
 	if ir.lambdaTransportSocket != nil {
 		out.TransportSocket = ir.lambdaTransportSocket
@@ -91,11 +98,11 @@ func processAws(ir *AwsIr, out *envoyclusterv3.Cluster) error {
 		opts.UpstreamProtocolOptions = &envoy_upstreams_v3.HttpProtocolOptions_ExplicitHttpConfig_{
 			ExplicitHttpConfig: &envoy_upstreams_v3.HttpProtocolOptions_ExplicitHttpConfig{
 				ProtocolConfig: &envoy_upstreams_v3.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{
-					Http2ProtocolOptions: &envoycorev3.Http2ProtocolOptions{},
+					Http2ProtocolOptions: &envoy_core_v3.Http2ProtocolOptions{},
 				},
 			},
 		}
-		opts.CommonHttpProtocolOptions = &envoycorev3.HttpProtocolOptions{
+		opts.CommonHttpProtocolOptions = &envoy_core_v3.HttpProtocolOptions{
 			IdleTimeout: &durationpb.Duration{
 				Seconds: 30,
 			},
@@ -164,33 +171,27 @@ type lambdaFilters struct {
 
 // Equals checks if two lambdaFilters objects are equal.
 func (u *lambdaFilters) Equals(other *lambdaFilters) bool {
-	return cmputils.CompareWithNils(u, other, func(a, b *lambdaFilters) bool {
-		return proto.Equal(a.lambdaConfigAny, b.lambdaConfigAny) &&
-			proto.Equal(a.awsRequestSigningAny, b.awsRequestSigningAny) &&
-			proto.Equal(a.codecConfigAny, b.codecConfigAny)
-	})
+	if u == nil && other != nil {
+		return false
+	}
+	if u != nil {
+		if other == nil {
+			return false
+		}
+		return proto.Equal(u.lambdaConfigAny, other.lambdaConfigAny) &&
+			proto.Equal(u.awsRequestSigningAny, other.awsRequestSigningAny) &&
+			proto.Equal(u.codecConfigAny, other.codecConfigAny)
+	}
+
+	// only if both are nil
+	return true
 }
 
 // buildLambdaFilters configures cluster's upstream HTTP filters for the given backend.
-func buildLambdaFilters(
-	arn string,
-	region string,
-	secret *ir.Secret,
-	invokeMode envoy_lambda_v3.Config_InvocationMode,
-	payloadTransformMode v1alpha1.AWSLambdaPayloadTransformMode,
-) (*lambdaFilters, error) {
-	var payloadPassthrough bool
-	switch payloadTransformMode {
-	case v1alpha1.AWSLambdaPayloadTransformNone:
-		payloadPassthrough = true
-	case v1alpha1.AWSLambdaPayloadTransformEnvoy:
-		payloadPassthrough = false
-	}
-
+func buildLambdaFilters(arn, region string, secret *ir.Secret, invokeMode envoy_lambda_v3.Config_InvocationMode) (*lambdaFilters, error) {
 	lambdaConfigAny, err := utils.MessageToAny(&envoy_lambda_v3.Config{
-		Arn:                arn,
-		InvocationMode:     invokeMode,
-		PayloadPassthrough: payloadPassthrough,
+		Arn:            arn,
+		InvocationMode: invokeMode,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create lambda config: %v", err)
@@ -223,14 +224,14 @@ func getRegion(in *v1alpha1.AwsBackend) string {
 	if in.Region != nil {
 		return *in.Region
 	}
-	return wellknown.DefaultAWSRegion
+	return defaultAWSRegion
 }
 
 // getLambdaHostname returns the hostname for the lambda function. When using a custom endpoint
 // has been specified, it will be returned. Otherwise, the default lambda hostname is returned.
 func getLambdaHostname(in *v1alpha1.AwsBackend) string {
-	if in.Lambda.EndpointURL != nil {
-		return *in.Lambda.EndpointURL
+	if in.Lambda.EndpointURL != "" {
+		return in.Lambda.EndpointURL
 	}
 	return fmt.Sprintf("lambda.%s.amazonaws.com", getRegion(in))
 }
@@ -245,12 +246,15 @@ func getLambdaInvocationMode(in *v1alpha1.AwsBackend) envoy_lambda_v3.Config_Inv
 }
 
 // buildLambdaARN attempts to build a fully qualified lambda arn from the given backend configuration.
-// CEL validation should reject invalid `qualifier` values and handle defaulting, so we can assume
-// the qualifier passed here is valid.
-// An error is returned if the arn is not a valid lambda arn.
+// If the qualifier is not specified, the $LATEST qualifier is used. An error is returned if the arn
+// is not a valid lambda arn.
 func buildLambdaARN(in *v1alpha1.AwsBackend, region string) (string, error) {
+	qualifier := "$LATEST"
+	if in.Lambda.Qualifier != "" {
+		qualifier = in.Lambda.Qualifier
+	}
 	// TODO(tim): url.QueryEscape(...)?
-	arnStr := fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s:%s", region, in.AccountId, in.Lambda.FunctionName, in.Lambda.Qualifier)
+	arnStr := fmt.Sprintf("arn:aws:lambda:%s:%s:function:%s:%s", region, in.AccountId, in.Lambda.FunctionName, qualifier)
 	parsedARN, err := arnutils.Parse(arnStr)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse lambda arn: %v", err)
@@ -277,14 +281,12 @@ func configureLambdaEndpoint(in *v1alpha1.AwsBackend) (*lambdaEndpointConfig, er
 		port:     443,
 		useTLS:   true,
 	}
-
-	if in.Lambda.EndpointURL == nil {
+	if in.Lambda.EndpointURL == "" {
 		// no custom endpoint specified, use the default lambda hostname.
 		return config, nil
 	}
 
-	inUrl := *in.Lambda.EndpointURL
-	parsedURL, err := url.Parse(inUrl)
+	parsedURL, err := url.Parse(in.Lambda.EndpointURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse endpoint URL: %v", err)
 	}
@@ -315,20 +317,20 @@ type staticSecretDerivation struct {
 func deriveStaticSecret(awsSecrets *ir.Secret) (*staticSecretDerivation, error) {
 	var errs []error
 	// validate that the secret has field in string format and has an access_key and secret_key
-	if awsSecrets.Data[wellknown.AccessKey] == nil || !utf8.Valid(awsSecrets.Data[wellknown.AccessKey]) {
+	if awsSecrets.Data[accessKey] == nil || !utf8.Valid(awsSecrets.Data[accessKey]) {
 		// err is nil here but this is still safe
 		errs = append(errs, errors.New("access_key is not a valid string"))
 	}
-	if awsSecrets.Data[wellknown.SecretKey] == nil || !utf8.Valid(awsSecrets.Data[wellknown.SecretKey]) {
+	if awsSecrets.Data[secretKey] == nil || !utf8.Valid(awsSecrets.Data[secretKey]) {
 		errs = append(errs, errors.New("secret_key is not a valid string"))
 	}
 	// Session key is optional, but if it is present, it must be a valid string.
-	if awsSecrets.Data[wellknown.SessionToken] != nil && !utf8.Valid(awsSecrets.Data[wellknown.SessionToken]) {
+	if awsSecrets.Data[sessionToken] != nil && !utf8.Valid(awsSecrets.Data[sessionToken]) {
 		errs = append(errs, errors.New("session_key is not a valid string"))
 	}
 	return &staticSecretDerivation{
-		access:  string(awsSecrets.Data[wellknown.AccessKey]),
-		session: string(awsSecrets.Data[wellknown.SessionToken]),
-		secret:  string(awsSecrets.Data[wellknown.SecretKey]),
+		access:  string(awsSecrets.Data[accessKey]),
+		session: string(awsSecrets.Data[sessionToken]),
+		secret:  string(awsSecrets.Data[secretKey]),
 	}, errors.Join(errs...)
 }

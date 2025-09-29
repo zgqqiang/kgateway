@@ -1,22 +1,9 @@
-Clusters:
-- connectTimeout: 5s
-  edsClusterConfig:
-    edsConfig:
-      ads: {}
-      resourceApiVersion: V3
-  ignoreHealthOnHostRemoval: true
-  metadata: {}
-  name: kube_default_example-svc_80
-  type: EDS
-- connectTimeout: 5s
-  metadata: {}
-  name: test-backend-plugin_default_example-svc_80
 Listeners:
 - address:
     socketAddress:
       address: '::'
       ipv4Compat: true
-      portValue: 443
+      portValue: 8443
   filterChains:
   - filters:
     - name: envoy.filters.network.http_connection_manager
@@ -34,7 +21,7 @@ Listeners:
             resourceApiVersion: V3
           routeConfigName: https
         statPrefix: http
-        useRemoteAddress: true
+        use_remote_address: true
     name: https
     transportSocket:
       name: envoy.transport_sockets.tls
@@ -66,7 +53,7 @@ Listeners:
             resourceApiVersion: V3
           routeConfigName: https-with-hostname
         statPrefix: http
-        useRemoteAddress: true
+        use_remote_address: true
     name: https-with-hostname
     transportSocket:
       name: envoy.transport_sockets.tls
@@ -83,7 +70,7 @@ Listeners:
   - name: envoy.filters.listener.tls_inspector
     typedConfig:
       '@type': type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
-  name: listener~443
+  name: https~https-with-hostname
 Routes:
 - ignorePortInHostMatching: true
   name: https
@@ -124,112 +111,3 @@ Routes:
       route:
         cluster: kube_default_example-svc_80
         clusterNotFoundResponseCode: INTERNAL_SERVER_ERROR
-Statuses:
-  gateways:
-    default/example-gateway:
-      conditions:
-      - lastTransitionTime: null
-        message: ""
-        reason: ListenerSetsNotAllowed
-        status: Unknown
-        type: AttachedListenerSets
-      - lastTransitionTime: null
-        message: Gateway is accepted
-        reason: Accepted
-        status: "True"
-        type: Accepted
-      - lastTransitionTime: null
-        message: Gateway is programmed
-        reason: Programmed
-        status: "True"
-        type: Programmed
-      listeners:
-      - attachedRoutes: 2
-        conditions:
-        - lastTransitionTime: null
-          message: Listener is accepted
-          reason: Accepted
-          status: "True"
-          type: Accepted
-        - lastTransitionTime: null
-          message: Listener does not have conflicts
-          reason: NoConflicts
-          status: "False"
-          type: Conflicted
-        - lastTransitionTime: null
-          message: Listener has valid refs
-          reason: ResolvedRefs
-          status: "True"
-          type: ResolvedRefs
-        - lastTransitionTime: null
-          message: Listener is programmed
-          reason: Programmed
-          status: "True"
-          type: Programmed
-        name: https
-        supportedKinds:
-        - group: gateway.networking.k8s.io
-          kind: HTTPRoute
-      - attachedRoutes: 1
-        conditions:
-        - lastTransitionTime: null
-          message: Listener is accepted
-          reason: Accepted
-          status: "True"
-          type: Accepted
-        - lastTransitionTime: null
-          message: Listener does not have conflicts
-          reason: NoConflicts
-          status: "False"
-          type: Conflicted
-        - lastTransitionTime: null
-          message: Listener has valid refs
-          reason: ResolvedRefs
-          status: "True"
-          type: ResolvedRefs
-        - lastTransitionTime: null
-          message: Listener is programmed
-          reason: Programmed
-          status: "True"
-          type: Programmed
-        name: https-with-hostname
-        supportedKinds:
-        - group: gateway.networking.k8s.io
-          kind: HTTPRoute
-  httpRoutes:
-    default/example-route:
-      parents:
-      - conditions:
-        - lastTransitionTime: null
-          message: Route is accepted
-          reason: Accepted
-          status: "True"
-          type: Accepted
-        - lastTransitionTime: null
-          message: Route has valid refs
-          reason: ResolvedRefs
-          status: "True"
-          type: ResolvedRefs
-        controllerName: kgateway
-        parentRef:
-          group: ""
-          kind: ""
-          name: example-gateway
-    default/second-example-route:
-      parents:
-      - conditions:
-        - lastTransitionTime: null
-          message: Route is accepted
-          reason: Accepted
-          status: "True"
-          type: Accepted
-        - lastTransitionTime: null
-          message: Route has valid refs
-          reason: ResolvedRefs
-          status: "True"
-          type: ResolvedRefs
-        controllerName: kgateway
-        parentRef:
-          group: ""
-          kind: ""
-          name: example-gateway

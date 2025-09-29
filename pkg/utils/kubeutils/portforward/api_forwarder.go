@@ -3,12 +3,6 @@ package portforward
 import (
 	"context"
 	"fmt"
-	"log/slog"
-	"net"
-	"net/http"
-	"net/url"
-	"strconv"
-	"strings"
 
 	"github.com/kgateway-dev/kgateway/v2/pkg/utils/kubeutils"
 
@@ -16,10 +10,18 @@ import (
 
 	"github.com/avast/retry-go/v4"
 
+	"net"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+
+	"github.com/rotisserie/eris"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 
+	"github.com/solo-io/go-utils/contextutils"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
@@ -60,6 +62,8 @@ func (f *apiPortForwarder) Start(ctx context.Context, options ...retry.Option) e
 }
 
 func (f *apiPortForwarder) startOnce(ctx context.Context) error {
+	logger := contextutils.LoggerFrom(ctx)
+
 	config, err := GetRestConfigWithContext(f.properties.kubeConfig, f.properties.kubeContext, "")
 	if err != nil {
 		return err
@@ -116,7 +120,7 @@ func (f *apiPortForwarder) startOnce(ctx context.Context) error {
 		}
 		// Set local port now, as it may have been 0 as input
 		f.properties.localPort = int(p[0].Local)
-		slog.Debug("port forward established", "address", f.Address(), "pod", podName, "remote_port", f.properties.remotePort)
+		logger.Debugf("Port forward established %v -> %v.%v:%v", f.Address(), podName, podName, f.properties.remotePort)
 		// The apiPortForwarder is now ready.
 		return nil
 	}
@@ -170,8 +174,9 @@ func (f *apiPortForwarder) getPodName(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", err
 		}
+
 		if len(pods) == 0 {
-			return "", fmt.Errorf("No pods found for deployment %s: %s", f.properties.resourceNamespace, f.properties.resourceName)
+			return "", eris.Errorf("No pods found for deployment %s: %s", f.properties.resourceNamespace, f.properties.resourceName)
 		}
 		return pods[0], nil
 
@@ -182,8 +187,9 @@ func (f *apiPortForwarder) getPodName(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", err
 		}
+
 		if len(pods) == 0 {
-			return "", fmt.Errorf("No pods found for service %s: %s", f.properties.resourceNamespace, f.properties.resourceName)
+			return "", eris.Errorf("No pods found for service %s: %s", f.properties.resourceNamespace, f.properties.resourceName)
 		}
 		return pods[0], nil
 
@@ -191,7 +197,7 @@ func (f *apiPortForwarder) getPodName(ctx context.Context) (string, error) {
 		return f.properties.resourceName, nil
 	}
 
-	return "", fmt.Errorf("Could not determine pod name for resourceType: %s", f.properties.resourceType)
+	return "", eris.Errorf("Could not determine pod name for resourceType: %s", f.properties.resourceType)
 }
 
 // Fetch ClientConfig. If kubeConfigPath is not specified, retrieve the kubeconfig from environment in which this is invoked.

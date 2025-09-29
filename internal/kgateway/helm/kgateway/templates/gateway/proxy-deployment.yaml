@@ -1,5 +1,4 @@
 {{- $gateway := .Values.gateway }}
-{{- if not $gateway.agentgateway.enabled }}
 {{- $statsConfig := $gateway.stats }}
 apiVersion: apps/v1
 kind: Deployment
@@ -9,16 +8,12 @@ metadata:
     {{- include "kgateway.gateway.constLabels" . | nindent 4 }}
     {{- include "kgateway.gateway.labels" . | nindent 4 }}
 spec:
-  {{- if $gateway.replicaCount }}
+  {{- if not $gateway.autoscaling.enabled }}
   replicas: {{ $gateway.replicaCount }}
   {{- end }}
   selector:
     matchLabels:
       {{- include "kgateway.gateway.selectorLabels" . | nindent 6 }}
-  {{- with $gateway.strategy }}
-  strategy:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
   template:
     metadata:
       annotations:
@@ -32,11 +27,10 @@ spec:
       {{- end}}
       {{- if (($gateway.aiExtension).enabled) }}
       {{- if $gateway.aiExtension.stats }}
-        kgateway.dev/ai-stats-config-hash: {{ sha256sum $gateway.aiExtension.stats | trunc 64 }}
+        solo.io/ai-stats-config-hash: {{ sha256sum $gateway.aiExtension.stats | trunc 64 }}
       {{- end }}
       {{- end}}
       labels:
-        {{- include "kgateway.gateway.constLabels" . | nindent 8 }}
         {{- include "kgateway.gateway.selectorLabels" . | nindent 8 }}
         {{- with $gateway.extraPodLabels }}
         {{- toYaml . | nindent 8 }}
@@ -74,9 +68,6 @@ spec:
         volumeMounts:
         - mountPath: /etc/envoy
           name: envoy-config
-        {{- with $gateway.extraVolumeMounts }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
         env:
         - name: POD_NAME
           valueFrom:
@@ -88,9 +79,6 @@ spec:
               fieldPath: metadata.namespace
         - name: ENVOY_UID
           value: "0"
-{{- if $gateway.env }}
-{{ toYaml $gateway.env | indent 8 }}
-{{- end }} {{/* if $gateway.env */}}
         ports:
         {{- range $p := $gateway.ports }}
         - name: {{ $p.name }}
@@ -101,10 +89,6 @@ spec:
         - name: http-monitoring
           containerPort: 9091
         {{- end }}
-{{- if $gateway.startupProbe }}
-        startupProbe:
-{{ toYaml $gateway.startupProbe | indent 10}}
-{{- end }}{{/*if $gateway.startupProbe*/}}
 {{- if $gateway.readinessProbe }}
         readinessProbe:
 {{ toYaml $gateway.readinessProbe | indent 10}}
@@ -310,10 +294,8 @@ spec:
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
         volumeMounts:
-{{- if or $gateway.aiExtension.stats $gateway.aiExtension.tracing }}
-          - mountPath: /var/run/ai-otel-config
-            name: ai-otel-config
-{{- end }}
+          - mountPath: /var/run/stats
+            name: ai-stats-config
 {{- end }} {{/* if (($gateway.aiExtension).enabled) */}}
       {{- with $gateway.nodeSelector }}
       nodeSelector:
@@ -327,10 +309,6 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with $gateway.topologySpreadConstraints }}
-      topologySpreadConstraints:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       {{- if $gateway.terminationGracePeriodSeconds }}
       terminationGracePeriodSeconds: {{ $gateway.terminationGracePeriodSeconds }}
       {{- end }}
@@ -339,11 +317,9 @@ spec:
           name: {{ include "kgateway.gateway.fullname" . }}
         name: envoy-config
 {{- if (($gateway.aiExtension).enabled) }}
-{{- if or $gateway.aiExtension.stats $gateway.aiExtension.tracing }}
       - configMap:
-          name: {{ include "kgateway.gateway.fullname" . }}-ai-otel-config
-        name: ai-otel-config
-{{- end }}
+          name: {{ include "kgateway.gateway.fullname" . }}-ai-stats-config
+        name: ai-stats-config
 {{- end }} {{/* if (($gateway.aiExtension).enabled) */}}
 {{- if $gateway.istio.enabled }}
       - emptyDir:
@@ -371,9 +347,6 @@ spec:
       - name: workload-certs
         emptyDir: {}
 {{- end }} {{/* if $gateway.istio.enabled */}}
-      {{- with $gateway.extraVolumes }}
-      {{- toYaml . | nindent 6 }}
-      {{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -407,9 +380,6 @@ metadata:
     {{- end }}
 spec:
   type: {{ $gateway.service.type }}
-  {{- if $gateway.service.externalTrafficPolicy }}
-  externalTrafficPolicy: {{ $gateway.service.externalTrafficPolicy }}
-  {{- end }}
   {{- with $gateway.service.clusterIP }}
   clusterIP: {{ . }}
   {{- end }}
@@ -419,31 +389,23 @@ spec:
     protocol: {{ $p.protocol }}
     targetPort: {{ $p.targetPort }}
     port: {{ $p.port }}
-    {{- if $p.nodePort }}
-    nodePort: {{ $p.nodePort }}
-    {{- end }}
   {{- end }}
   selector:
     {{- include "kgateway.gateway.selectorLabels" . | nindent 4 }}
 ---
 {{- if (($gateway.aiExtension).enabled) }}
-{{- if or $gateway.aiExtension.stats $gateway.aiExtension.tracing }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "kgateway.gateway.fullname" . }}-ai-otel-config
+  name: {{ include "kgateway.gateway.fullname" . }}-ai-stats-config
   labels:
     {{- include "kgateway.gateway.constLabels" . | nindent 4 }}
     {{- include "kgateway.gateway.labels" . | nindent 4 }}
-data:
 {{- if $gateway.aiExtension.stats }}
-  stats.json: {{ $gateway.aiExtension.stats | toJson | quote }}
-{{- end }}
-{{- if $gateway.aiExtension.tracing }}
-  tracing.json: {{ $gateway.aiExtension.tracing | toJson | quote }}
-{{- end }}
-{{- end }} {{/* if or $gateway.aiExtension.stats $gateway.aiExtension.tracing */}}
-{{- end }} {{/* if (($gateway.aiExtension).enabled) */}}
+data:
+  stats.json: {{ $gateway.aiExtension.stats }}
+{{- end}}
+{{- end}}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -502,8 +464,7 @@ data:
                       pass_through_mode: false
                       headers:
                       - name: ":path"
-                        string_match:
-                          exact: "/envoy-hc"
+                        exact_match: "/envoy-hc"
 {{- end }}{{/*if $gateway.readinessProbe*/}}
                   - name: envoy.filters.http.router
                     typed_config:
@@ -532,16 +493,14 @@ data:
                               path: "/ready"
                               headers:
                                 - name: ":method"
-                                  string_match:
-                                    exact: GET
+                                  exact_match: GET
                             route:
                               cluster: admin_port_cluster
                           - match:
                               prefix: "/metrics"
                               headers:
                                 - name: ":method"
-                                  string_match:
-                                    exact: GET
+                                  exact_match: GET
                             route:
                               prefix_rewrite: {{ $statsConfig.routePrefixRewrite }}
                               cluster: admin_port_cluster
@@ -550,8 +509,7 @@ data:
                               prefix: "/stats"
                               headers:
                                 - name: ":method"
-                                  string_match:
-                                    exact: GET
+                                  exact_match: GET
                             route:
                               prefix_rewrite: {{ $statsConfig.statsPrefixRewrite }}
                               cluster: admin_port_cluster
@@ -625,5 +583,4 @@ data:
       lds_config:
         resource_api_version: V3
         ads: {}
-{{- end }} {{/* if not $gateway.agentgateway.enabled */}}
 ---

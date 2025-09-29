@@ -8,18 +8,12 @@ on:
         description: "Validate the release artifacts"
       version:
         type: string
-        required: true
-        description: |
-          Version override for the release (must start with 'v' followed by semantic version).
-          Examples: v1.2.3, v2.0.0-alpha.1, v1.0.0-beta.2
-      run_load_tests:
-        type: boolean
-        default: false
-        description: "Run load testing suite after release"
+        required: false
+        description: "Override the default version (e.g. v0.0.0-manual-<git-sha>)"
   push:
     tags:
       - 'v*'
-      - '!v2.1.0-main'
+      - '!v2.0.0-main'
     branches:
       - main
   pull_request:
@@ -27,11 +21,9 @@ on:
       - main
 
 env:
-  # this uses the `github.repository_owner` to support releases from forks (useful for testing).
+  # this is uses the `github.repository_owner` to support releases from forks (useful for testing).
   IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
   VANITY_REGISTRY: cr.kgateway.dev/kgateway-dev
-  MAIN_VERSION: v2.1.0-main
-  GORELEASER_DISABLE_RELEASE: false
 
 permissions:
   contents: write
@@ -55,18 +47,19 @@ jobs:
           GIT_SHA=$(git rev-parse --short HEAD)
           GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD | sed -e "s/\//-/g")
 
-          # Validate version input for workflow_dispatch
+          # Set version based on event type
           if [[ ${{ github.event_name }} == 'workflow_dispatch' ]]; then
-            VERSION="${{ inputs.version }}"
-            # Validate semver format. Modified version from the recommended semver format.
-            # See https://semver.org/#is-there-a-suggested-regular-expression-regex-to-check-a-semver-string.
-            if ! echo "$VERSION" | grep -E "^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-((0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(\+([0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*))?$" > /dev/null; then
-              echo "Error: Version '$VERSION' does not match required semver format (e.g., v1.2.3, v2.0.0-alpha.1)"
-              exit 1
+            if [[ -n "${{ inputs.version }}" ]]; then
+              VERSION="${{ inputs.version }}"
+            else
+              VERSION="v0.0.0-manual-${GIT_SHA}"
             fi
             echo "goreleaser_args=--clean --skip=validate" >> $GITHUB_OUTPUT
+          elif [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+            echo "goreleaser_args=--clean" >> $GITHUB_OUTPUT
           elif [[ $GITHUB_REF == refs/heads/main ]]; then
-            VERSION="${MAIN_VERSION}"
+            VERSION="v2.0.0-main"
             echo "goreleaser_args=--clean --skip=validate" >> $GITHUB_OUTPUT
           elif [[ $GITHUB_REF == refs/pull/* ]]; then
             GIT_TAG=$(git describe --tags --abbrev=0)
@@ -88,7 +81,11 @@ jobs:
 
       - name: Helm login to ${{ env.IMAGE_REGISTRY }}
         if: ${{ github.event_name != 'pull_request' }}
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | go tool helm registry login ${{ env.IMAGE_REGISTRY }} -u ${{ github.repository_owner }} --password-stdin
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.IMAGE_REGISTRY }} -u ${{ github.repository_owner }} --password-stdin
+
+      - name: Lint kgateway charts on PRs
+        if: ${{ github.event_name == 'pull_request' }}
+        run: make lint-kgateway-charts
 
       - name: Package kgateway chart
         run: make package-kgateway-charts
@@ -97,10 +94,9 @@ jobs:
 
       - name: Push kgateway chart to registry
         if: ${{ github.event_name != 'pull_request' }}
-        run: make release-charts
-        env:
-          VERSION: ${{ needs.setup.outputs.version }}
-          IMAGE_REGISTRY: ${{ env.IMAGE_REGISTRY }}
+        run: |
+          helm push _test/kgateway-${{ needs.setup.outputs.version }}.tgz oci://${{ env.IMAGE_REGISTRY }}/charts
+          helm push _test/kgateway-crds-${{ needs.setup.outputs.version }}.tgz oci://${{ env.IMAGE_REGISTRY }}/charts
   goreleaser:
     name: goreleaser
     needs: [setup, helm]
@@ -112,10 +108,18 @@ jobs:
       - name: Prep Go Runner
         uses: ./.github/actions/prep-go-runner
 
-      - name: Conditionally disable release for pushes to main
+      # We publish a rolling main release for every commit to main. Deleting the release
+      # ensures that the tagged commit is not stale. Goreleaser will create a new tag
+      # and release for the tagged commit.
+      - name: Delete v2.0.0-main release if it exists
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
         run: |
-          echo "GORELEASER_DISABLE_RELEASE=true" >> $GITHUB_ENV
+          set -x
+          echo "Deleting the v2.0.0-main release"
+          gh release delete v2.0.0-main --repo ${{ github.repository }} --yes --cleanup-tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log into ghcr.io
         if: ${{ github.event_name != 'pull_request' }}
@@ -136,7 +140,6 @@ jobs:
           IMAGE_REGISTRY: ${{ env.IMAGE_REGISTRY }}
           GORELEASER_ARGS: ${{ needs.setup.outputs.goreleaser_args }}
           GORELEASER_CURRENT_TAG: ${{ needs.setup.outputs.version }}
-          GORELEASER_DISABLE_RELEASE: ${{ env.GORELEASER_DISABLE_RELEASE }}
 
   validate:
     name: Validate release artifacts
@@ -150,7 +153,7 @@ jobs:
 
       - name: Login to ghcr.io
         if: ${{ github.event_name != 'pull_request' }}
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | go tool helm registry login ${{ env.IMAGE_REGISTRY }} -u ${{ github.repository_owner }} --password-stdin
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.IMAGE_REGISTRY }} -u ${{ github.repository_owner }} --password-stdin
 
       - name: Download module dependencies
         run: make mod-download
@@ -165,72 +168,23 @@ jobs:
       - name: Install the released chart
         run: |
           # install the crds first
-          go tool helm install kgateway-crds oci://${{ env.IMAGE_REGISTRY }}/charts/kgateway-crds \
+          helm install kgateway-crds oci://${{ env.IMAGE_REGISTRY }}/charts/kgateway-crds \
             --version ${{ needs.setup.outputs.version }} \
             --wait --timeout 5m
 
           # install the main chart
-          go tool helm install --create-namespace --namespace kgateway-system kgateway \
+          helm install --create-namespace --namespace kgateway-system kgateway \
             oci://${{ env.IMAGE_REGISTRY }}/charts/kgateway \
             --set image.registry=${{ env.IMAGE_REGISTRY }} \
             --version ${{ needs.setup.outputs.version }} \
-            --set inferenceExtension.enabled=true \
             --wait --timeout 5m
 
       - name: Wait for the kgateway deployment to be ready
         run: |
           kubectl wait --for=condition=available --timeout=5m deployment/kgateway -n kgateway-system
 
-      - name: Run Gateway API and Inference Extension Conformance Tests
-        run: make all-conformance
+      - name: Run Conformance Tests
+        run: make conformance
         shell: bash
-        env:
-          VERSION: ${{ needs.setup.outputs.version }}
-
-  load_tests:
-    name: Load Testing
-    needs: [setup, helm, goreleaser]
-    if: ${{ inputs.run_load_tests }}
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Prep Go Runner
-        uses: ./.github/actions/prep-go-runner
-
-      - name: Login to ghcr.io
-        if: ${{ github.event_name != 'pull_request' }}
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | go tool helm registry login ${{ env.IMAGE_REGISTRY }} -u ${{ github.repository_owner }} --password-stdin
-
-      - name: Download module dependencies
-        run: make mod-download
-
-      - name: Setup kind cluster
-        run: ./hack/kind/setup-kind.sh
-        env:
-          VERSION: ${{ needs.setup.outputs.version }}
-          SKIP_DOCKER: "true"
-          CONFORMANCE: "true"
-
-      - name: Install the released chart
-        run: |
-          # install the crds first
-          go tool helm install kgateway-crds oci://${{ env.IMAGE_REGISTRY }}/charts/kgateway-crds \
-            --version ${{ needs.setup.outputs.version }} \
-            --wait --timeout 5m
-
-          # install the main chart
-          go tool helm install --create-namespace --namespace kgateway-system kgateway \
-            oci://${{ env.IMAGE_REGISTRY }}/charts/kgateway \
-            --set image.registry=${{ env.IMAGE_REGISTRY }} \
-            --version ${{ needs.setup.outputs.version }} \
-            --set inferenceExtension.enabled=true \
-            --wait --timeout 5m
-
-      - name: Wait for the kgateway deployment to be ready
-        run: |
-          kubectl wait --for=condition=available --timeout=5m deployment/kgateway -n kgateway-system
-
-      - name: Run load tests
-        run: make run-load-tests
         env:
           VERSION: ${{ needs.setup.outputs.version }}

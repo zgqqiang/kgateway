@@ -1,22 +1,30 @@
 grpcio
-grpcio-tools
+grpcio-tools==1.62.2
 grpcio-health-checking
-protobuf>=5.26.1,<6.0.0
+protobuf>4.0.0,<5.0.0
 prometheus-client
+langchain-openai
+langchain-community
+langchain-postgres
+langchainhub
+tldextract
 openai
-tiktoken
+bs4
+psycopg[c]
+gptcache
 fastapi[standard]
 uvicorn[standard]
+async-lru
 python-multipart
+kubernetes
 # There is an issue: https://github.com/explosion/cython-blis/issues/117 that causes mac and arm linux
 # build to fail. Temp workaround is to limit spacy to < 3.8.0. Switch over to pyproject.toml and use
 # platform specific deps if needed
 spacy<3.8.0
-numpy~=1.26.4
+numpy==1.26.4
 presidio_analyzer
 presidio_anonymizer
-opentelemetry-distro~=0.56b0
-opentelemetry-instrumentation-grpc~=0.56b0
-opentelemetry-exporter-otlp~=1.35.0
+opentelemetry-distro
+opentelemetry-instrumentation-grpc
+opentelemetry-exporter-otlp-proto-grpc
 httpx
-pytest-httpx

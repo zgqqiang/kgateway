@@ -12,6 +12,7 @@ import (
 	"github.com/kgateway-dev/kgateway/v2/test/testutils"
 )
 
+// TestKgateway is the function which executes a series of tests against a given installation
 func TestKgateway(t *testing.T) {
 	ctx := context.Background()
 	installNs, nsEnvPredefined := envutils.LookupOrDefault(testutils.InstallNamespace, "kgateway-test")
@@ -21,9 +22,6 @@ func TestKgateway(t *testing.T) {
 			InstallNamespace:          installNs,
 			ProfileValuesManifestFile: e2e.CommonRecommendationManifest,
 			ValuesManifestFile:        e2e.EmptyValuesManifestPath,
-			ExtraHelmArgs: []string{
-				"--set", "controller.extraEnv.KGW_GLOBAL_POLICY_NAMESPACE=" + installNs,
-			},
 		},
 	)
 
@@ -37,6 +35,9 @@ func TestKgateway(t *testing.T) {
 	t.Cleanup(func() {
 		if !nsEnvPredefined {
 			os.Unsetenv(testutils.InstallNamespace)
+		}
+		if t.Failed() {
+			testInstallation.PreFailHandler(ctx)
 		}
 
 		testInstallation.UninstallKgateway(ctx)

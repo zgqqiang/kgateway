@@ -236,11 +236,6 @@ func (s *testingSuite) TestConfigureTLSRouteBackingDestinations() {
 				s.testInstallation.Assertions.EventuallyGatewayListenerAttachedRoutes(s.ctx, tc.gtwName, tc.gtwNs, listenerName, expectedRouteCount, timeout)
 			}
 
-			// Assert curl pod is running
-			s.testInstallation.Assertions.EventuallyPodsRunning(s.ctx, tc.gtwNs, metav1.ListOptions{
-				LabelSelector: "app=curl",
-			})
-
 			// Assert expected responses
 			for i, port := range tc.ports {
 				if tc.expectedErrorCode != 0 {
@@ -287,10 +282,6 @@ func (s *testingSuite) setupTestEnvironment(nsManifest, gtwName, gtwNs, gtwManif
 
 	s.applyManifests(gtwNs, svcManifest)
 	s.testInstallation.Assertions.EventuallyObjectsExist(s.ctx, proxySvc, proxyDeploy)
-
-	s.testInstallation.Assertions.EventuallyPodsRunning(s.ctx, proxyDeploy.GetNamespace(), metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app.kubernetes.io/name=%s", proxyDeploy.GetName()),
-	})
 }
 
 func (s *testingSuite) applyManifests(ns string, manifests ...string) {

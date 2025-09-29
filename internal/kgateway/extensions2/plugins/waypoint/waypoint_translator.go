@@ -3,79 +3,66 @@ package waypoint
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/wrapperspb"
-	authcr "istio.io/client-go/pkg/apis/security/v1"
-	"istio.io/istio/pkg/kube/krt"
-	"istio.io/istio/pkg/slices"
-	"istio.io/istio/pkg/util/sets"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	"github.com/kgateway-dev/kgateway/v2/api/settings"
+	"github.com/solo-io/go-utils/contextutils"
+
+	extensionsplug "github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/plugin"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/plugins/sandwich"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/plugins/waypoint/waypointquery"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/query"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/reports"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/translator/httproute"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/wellknown"
-	"github.com/kgateway-dev/kgateway/v2/pkg/logging"
-	sdk "github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk"
-	reports "github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/reporter"
-	"github.com/kgateway-dev/kgateway/v2/pkg/utils/cmputils"
 	"github.com/kgateway-dev/kgateway/v2/pkg/utils/stringutils"
+
+	istiosecurity "istio.io/client-go/pkg/apis/security/v1"
+	"istio.io/istio/pkg/kube/krt"
+	"istio.io/istio/pkg/slices"
+	"istio.io/istio/pkg/util/sets"
 )
 
 const (
 	// IstioPROXYProtocol is the only protocol for a kgateway-waypoint's Listener
 	IstioPROXYProtocol = "istio.io/PROXY"
-
-	loopbackBindAddr   = "127.0.0.1"
-	wildcardBindAddr   = "0.0.0.0"
-	loopbackBindAddrV6 = "::ffff:127.0.0.1"
-	wildcardBindAddrV6 = "::"
 )
 
-var logger = logging.New("plugin/waypoint")
+var _ extensionsplug.KGwTranslator = &waypointTranslator{}
 
 type waypointTranslator struct {
 	queries         query.GatewayQueries
 	waypointQueries waypointquery.WaypointQueries
-
-	localBind     bool
-	rootNamespace string
-	bindIpv6      bool
 }
-
-var _ sdk.KGwTranslator = &waypointTranslator{}
 
 func NewTranslator(
 	queries query.GatewayQueries,
 	waypointQueries waypointquery.WaypointQueries,
-	settings settings.Settings,
-) sdk.KGwTranslator {
+) extensionsplug.KGwTranslator {
 	return &waypointTranslator{
 		queries:         queries,
 		waypointQueries: waypointQueries,
-		localBind:       settings.WaypointLocalBinding,
-		rootNamespace:   settings.IstioNamespace,
-		bindIpv6:        settings.ListenerBindIpv6,
 	}
 }
 
-// Translate implements sdk.KGwTranslator.
+// Translate implements extensionsplug.KGwTranslator.
 func (w *waypointTranslator) Translate(
 	kctx krt.HandlerContext,
 	ctx context.Context,
 	gateway *ir.Gateway,
 	reporter reports.Reporter,
 ) *ir.GatewayIR {
+	logger := contextutils.LoggerFrom(ctx)
+
 	gwReporter := reporter.Gateway(gateway.Obj)
-	proxyListener, gwListener := w.buildInboundListener(gateway, gwReporter)
+	proxyListener, gwListener := buildInboundListener(gateway, gwReporter)
 	if proxyListener == nil || gwListener == nil {
 		// reporting/logging in BuildInboundListener
 		return nil
@@ -85,7 +72,7 @@ func (w *waypointTranslator) Translate(
 	// and get merged with per-service routes
 	routes, err := w.fetchGatewayRoutes(kctx, ctx, gateway, gwListener, reporter, gwReporter)
 	if err != nil {
-		logger.Error("failed getting HTTPRoutes for Gateway", "error", err)
+		logger.Errorf("failed getting HTTPRoutes for Gateway: %v", err)
 		return nil
 	}
 
@@ -97,6 +84,7 @@ func (w *waypointTranslator) Translate(
 		attachedRoutes.Insert(namespacedName(hr))
 	}
 
+	authzPolicies := w.waypointQueries.GetAuthorizationPolicies(kctx, ctx, gateway.Namespace, RootNamespace)
 	waypointFor := waypointquery.GetWaypointFor(gateway.Obj)
 
 	if waypointFor.ForService() {
@@ -109,10 +97,16 @@ func (w *waypointTranslator) Translate(
 			routes,
 			gwListener,
 			attachedRoutes,
-			w.rootNamespace,
+			authzPolicies,
 		)
 		proxyListener.HttpFilterChain = append(proxyListener.HttpFilterChain, http...)
 		proxyListener.TcpFilterChain = append(proxyListener.TcpFilterChain, tcp...)
+	}
+
+	if proxyListener == nil {
+		// shouldn't be possible
+		contextutils.LoggerFrom(ctx).DPanic("PROXY listener was nil")
+		return nil
 	}
 
 	// ensure consistent ordering in outputs
@@ -123,15 +117,12 @@ func (w *waypointTranslator) Translate(
 		return fc.FilterChainName
 	})
 
-	// don't include the listener unless we have filter chains
-	outListeners := []ir.ListenerIR{}
-	if len(proxyListener.HttpFilterChain)+len(proxyListener.TcpFilterChain) > 0 {
-		outListeners = append(outListeners, *proxyListener)
-	}
-
 	return &ir.GatewayIR{
-		Listeners:            outListeners,
-		SourceObject:         gateway,
+		// single listener
+		Listeners: []ir.ListenerIR{
+			*proxyListener,
+		},
+		SourceObject:         gateway.Obj,
 		AttachedPolicies:     gateway.AttachedListenerPolicies,
 		AttachedHttpPolicies: gateway.AttachedHttpPolicies,
 	}
@@ -146,7 +137,7 @@ var waypointSupportedKinds = []gwv1.RouteGroupKind{
 
 // TODO allow _not_ specifying any listeners and inferring the specific
 // structure we expect with reasonable defaults (15088)
-func (w *waypointTranslator) buildInboundListener(gw *ir.Gateway, reporter reports.GatewayReporter) (*ir.ListenerIR, *ir.Listener) {
+func buildInboundListener(gw *ir.Gateway, reporter reports.GatewayReporter) (*ir.ListenerIR, *ir.Listener) {
 	// find the single inbound listener
 	var gatewayListener *ir.Listener
 	for _, l := range gw.Listeners {
@@ -157,7 +148,8 @@ func (w *waypointTranslator) buildInboundListener(gw *ir.Gateway, reporter repor
 			// if no allowed kinds, just use all of our default supportedKinds
 			supportedKinds := slices.Filter(waypointSupportedKinds, func(s gwv1.RouteGroupKind) bool {
 				return l.AllowedRoutes == nil || nil != slices.FindFunc(l.AllowedRoutes.Kinds, func(lk gwv1.RouteGroupKind) bool {
-					return cmputils.PointerValsEqual(lk.Group, s.Group) && lk.Kind == s.Kind
+					groupEq := (lk.Group == nil && s.Group == nil) || (lk.Group != nil && s.Group != nil && *lk.Group == *s.Group)
+					return groupEq && lk.Kind == s.Kind
 				})
 			})
 			reporter.Listener(&l.Listener).SetSupportedKinds(supportedKinds)
@@ -183,22 +175,10 @@ func (w *waypointTranslator) buildInboundListener(gw *ir.Gateway, reporter repor
 		return nil, nil
 	}
 
-	bindAddr := wildcardBindAddr
-	if w.bindIpv6 {
-		bindAddr = wildcardBindAddrV6
-	}
-	if w.localBind {
-		bindAddr = loopbackBindAddr
-		if w.bindIpv6 {
-			bindAddr = loopbackBindAddrV6
-		}
-	}
-
 	return &ir.ListenerIR{
-		Name:              "proxy_protocol_inbound",
-		BindAddress:       bindAddr,
-		BindPort:          uint32(gatewayListener.Port), //nolint:gosec // G115: Gateway API listener port is int32, always in valid range
-		PolicyAncestorRef: gatewayListener.PolicyAncestorRef,
+		Name:        "proxy_protocol_inbound",
+		BindAddress: "::",
+		BindPort:    uint32(gatewayListener.Port),
 
 		AttachedPolicies: ir.AttachedPolicies{
 			Policies: map[schema.GroupKind][]ir.PolicyAtt{
@@ -219,7 +199,7 @@ func (t *waypointTranslator) fetchGatewayRoutes(
 	reporter reports.Reporter,
 	gwReporter reports.GatewayReporter,
 ) ([]*query.RouteInfo, error) {
-	gwRoutes, err := t.queries.GetRoutesForGateway(kctx, ctx, gw)
+	gwRoutes, err := t.queries.GetRoutesForGateway(kctx, ctx, gw.Obj)
 	if err != nil {
 		gwReporter.SetCondition(reports.GatewayCondition{
 			Type:    gwv1.GatewayConditionProgrammed,
@@ -237,13 +217,13 @@ func (t *waypointTranslator) fetchGatewayRoutes(
 			Message: rErr.Error.Error(),
 		})
 	}
-	routes := gwRoutes.GetListenerResult(gwListener.Parent, string(gwListener.Name))
-	if routes == nil {
+	routes, ok := gwRoutes.ListenerResults[string(gwListener.Name)]
+	if !ok {
 		// no routes for the single inbound PROXY listener
 		return nil, nil
 	}
 	if err := routes.Error; err != nil {
-		logger.Error("listener error when fetching HTTPRoutes for Gateway", "error", err)
+		contextutils.LoggerFrom(ctx).Warnf("listener error when fetching HTTPRoutes for %s: %v", namespacedName(gw), err)
 		return nil, err
 	}
 
@@ -253,27 +233,19 @@ func (t *waypointTranslator) fetchGatewayRoutes(
 func (t *waypointTranslator) buildServiceChains(
 	kctx krt.HandlerContext,
 	ctx context.Context,
-	logger *slog.Logger,
+	logger *zap.SugaredLogger,
 	baseReporter reports.Reporter,
 	gw *ir.Gateway,
 	gwRoutes []*query.RouteInfo,
 	gwListener *ir.Listener,
 	attachedRoutes sets.Set[types.NamespacedName],
-	rootNamespace string,
+	authzPolicies []*istiosecurity.AuthorizationPolicy,
 ) ([]ir.HttpFilterChainIR, []ir.TcpIR) {
 	var httpOut []ir.HttpFilterChainIR
 	var tcpOut []ir.TcpIR
 	// get attached services (istio.io/use-waypoint)
 	services := t.waypointQueries.GetWaypointServices(kctx, ctx, gw.Obj)
-	logger.Debug("attaching waypoint services", "gateway", namespacedName(gw).String(), "services", len(services))
-
-	// Fetch Gateway (and GatewayClass) attached policies
-	gwAuthzPolicies := t.waypointQueries.GetAuthorizationPoliciesForGateway(
-		kctx,
-		ctx,
-		gw.Obj,
-		rootNamespace,
-	)
+	logger.Debugw("attaching waypoint services", "gateway", namespacedName(gw).String(), "services", len(services))
 
 	// for each service:
 	// * 1:1 Service port -> filter chain
@@ -284,17 +256,8 @@ func (t *waypointTranslator) buildServiceChains(
 	// For TCP:
 	// * Just forward traffic
 	// * TODO TCPRoute
-
 	for _, svc := range services {
-		serviceSpecificPolicies := t.waypointQueries.GetAuthorizationPoliciesForService(kctx, ctx, &svc)
-
-		// Combine with gateway policies (which serve as namespace-wide policies)
-		combinedPolicies := make([]*authcr.AuthorizationPolicy, 0, len(gwAuthzPolicies)+len(serviceSpecificPolicies))
-
-		combinedPolicies = append(combinedPolicies, gwAuthzPolicies...)
-		combinedPolicies = append(combinedPolicies, serviceSpecificPolicies...)
-
-		tcpRBAC, httpRBAC := BuildRBAC(combinedPolicies, gw.Obj, &svc)
+		tcpRBAC, httpRBAC := BuildRBACForService(authzPolicies, gw.Obj, &svc)
 
 		// get Service-specific routes
 		httpRoutes := gwRoutes
@@ -308,13 +271,13 @@ func (t *waypointTranslator) buildServiceChains(
 		// HTTPRoutes apply at the Service level, not the port
 		// level so we don't need to generate this multiple times
 		// TODO respect `port` on parentRef
-		httpRoutesVirtualHost := t.buildHTTPVirtualHost(ctx, baseReporter, gwListener, svc, httpRoutes)
+		httpRoutesVirtualHost := t.buildHTTPVirtualHost(ctx, baseReporter, gw, gwListener, svc, httpRoutes)
 
 		for _, svcPort := range svc.Ports {
 			filterChain, err := initServiceChain(svc, svcPort)
 			if err != nil {
 				// TODO if/when we support headless, initServiceChain should be infallible
-				logger.Debug(
+				logger.Debugw(
 					"service had invalid or missing VIPs",
 					"service",
 					svc.GetName(),
@@ -339,7 +302,7 @@ func (t *waypointTranslator) buildServiceChains(
 				}
 
 				// Apply HTTP RBAC filters to this HTTP filter chain
-				applyHTTPRBACFilters(&httpChain, httpRBAC)
+				applyHTTPRBACFilters(&httpChain, httpRBAC, svc)
 				httpOut = append(httpOut, httpChain)
 			} else {
 				tcpChain := ir.TcpIR{
@@ -348,7 +311,8 @@ func (t *waypointTranslator) buildServiceChains(
 				}
 
 				// Apply TCP RBAC filters to this TCP filter chain
-				applyTCPRBACFilters(&tcpChain, tcpRBAC)
+				applyTCPRBACFilters(&tcpChain, tcpRBAC, svc)
+
 				tcpOut = append(tcpOut, tcpChain)
 			}
 		}
@@ -379,7 +343,7 @@ func initServiceChain(
 	}
 	match := ir.FilterChainMatch{
 		PrefixRanges:    prefixRanges,
-		DestinationPort: &wrapperspb.UInt32Value{Value: uint32(port.Port)}, //nolint:gosec // G115: service port is int32, always in valid range
+		DestinationPort: &wrapperspb.UInt32Value{Value: uint32(port.Port)},
 	}
 
 	fcCommon := ir.FilterChainCommon{
@@ -395,6 +359,7 @@ func initServiceChain(
 func (t *waypointTranslator) buildHTTPVirtualHost(
 	ctx context.Context,
 	baseReporter reports.Reporter,
+	gw *ir.Gateway,
 	gwListener *ir.Listener,
 	svc waypointquery.Service,
 	httpRoutes []*query.RouteInfo,
@@ -409,6 +374,7 @@ func (t *waypointTranslator) buildHTTPVirtualHost(
 		parentRefReporter := baseReporter.Route(httpRoute.Object.GetSourceObject()).ParentRef(&httpRoute.ParentRef)
 		translatedRoutes = append(translatedRoutes, httproute.TranslateGatewayHTTPRouteRules(
 			ctx,
+			gwListener.Listener,
 			httpRoute,
 			parentRefReporter,
 			baseReporter,

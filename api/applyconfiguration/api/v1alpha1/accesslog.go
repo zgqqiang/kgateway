@@ -5,10 +5,9 @@ package v1alpha1
 // AccessLogApplyConfiguration represents a declarative configuration of the AccessLog type for use
 // with apply.
 type AccessLogApplyConfiguration struct {
-	FileSink      *FileSinkApplyConfiguration                      `json:"fileSink,omitempty"`
-	GrpcService   *AccessLogGrpcServiceApplyConfiguration          `json:"grpcService,omitempty"`
-	OpenTelemetry *OpenTelemetryAccessLogServiceApplyConfiguration `json:"openTelemetry,omitempty"`
-	Filter        *AccessLogFilterApplyConfiguration               `json:"filter,omitempty"`
+	FileSink    *FileSinkApplyConfiguration        `json:"fileSink,omitempty"`
+	GrpcService *GrpcServiceApplyConfiguration     `json:"grpcService,omitempty"`
+	Filter      *AccessLogFilterApplyConfiguration `json:"filter,omitempty"`
 }
 
 // AccessLogApplyConfiguration constructs a declarative configuration of the AccessLog type for use with
@@ -28,16 +27,8 @@ func (b *AccessLogApplyConfiguration) WithFileSink(value *FileSinkApplyConfigura
 // WithGrpcService sets the GrpcService field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the GrpcService field is set to the value of the last call.
-func (b *AccessLogApplyConfiguration) WithGrpcService(value *AccessLogGrpcServiceApplyConfiguration) *AccessLogApplyConfiguration {
+func (b *AccessLogApplyConfiguration) WithGrpcService(value *GrpcServiceApplyConfiguration) *AccessLogApplyConfiguration {
 	b.GrpcService = value
-	return b
-}
-
-// WithOpenTelemetry sets the OpenTelemetry field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the OpenTelemetry field is set to the value of the last call.
-func (b *AccessLogApplyConfiguration) WithOpenTelemetry(value *OpenTelemetryAccessLogServiceApplyConfiguration) *AccessLogApplyConfiguration {
-	b.OpenTelemetry = value
 	return b
 }
 

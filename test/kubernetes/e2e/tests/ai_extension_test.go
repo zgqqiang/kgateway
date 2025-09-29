@@ -28,7 +28,7 @@ func TestAIExtensions(t *testing.T) {
 		t,
 		&install.Context{
 			InstallNamespace:          installNs,
-			ProfileValuesManifestFile: e2e.ManifestPath("ai-extension-helm.yaml"),
+			ProfileValuesManifestFile: e2e.AIValuesManifestPath,
 			ValuesManifestFile:        e2e.EmptyValuesManifestPath,
 		},
 	)
@@ -76,7 +76,7 @@ func bootstrapEnv(
 	openaiKey := "fake-openai-key"
 	azureOpenAiKey := "fake-azure-openai-key"
 	geminiKey := "fake-gemini-key"
-	vertexAITokenStr := "fake-vertex-ai-token" //nolint:gosec // G101: fake token for testing, not a real credential
+	vertexAITokenStr := "fake-vertex-ai-token"
 
 	secretsMap := map[string]map[string]string{
 		"openai-secret":    {"Authorization": openaiKey},

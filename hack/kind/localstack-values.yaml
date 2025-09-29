@@ -1,5 +1,3 @@
-image:
-  tag: "4.8.0"
 extraEnvVars:
   - name: LS_LOG
     value: debug

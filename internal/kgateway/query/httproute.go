@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -10,16 +11,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gwv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
-	gwxv1a1 "sigs.k8s.io/gateway-api/apisx/v1alpha1"
 
-	apilabels "github.com/kgateway-dev/kgateway/v2/api/labels"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/krtcollections"
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/translator/utils"
-	delegationutils "github.com/kgateway-dev/kgateway/v2/internal/kgateway/utils/delegation"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/wellknown"
 )
 
@@ -83,7 +78,7 @@ func (r *RouteInfo) Hostnames() []string {
 
 // GetChildrenForRef fetches child routes for a given BackendObjectReference.
 func (r *RouteInfo) GetChildrenForRef(backendRef ir.ObjectSource) ([]*RouteInfo, error) {
-	return r.Children.get(backendRef)
+	return r.Children.get(backendRef, nil)
 }
 
 // Clone creates a deep copy of the RouteInfo object.
@@ -102,11 +97,8 @@ func (r *RouteInfo) Clone() *RouteInfo {
 
 // UniqueRouteName returns a unique name for the route based on the route kind, name, namespace,
 // and the given indexes.
-func (r *RouteInfo) UniqueRouteName(ruleIdx, matchIdx int, ruleName string) string {
-	if ruleName == "" {
-		return fmt.Sprintf("%s-%s-%s-%d-%d", strings.ToLower(r.GetKind()), r.GetName(), r.GetNamespace(), ruleIdx, matchIdx)
-	}
-	return fmt.Sprintf("%s-%s-%s-%d-%d-%s", strings.ToLower(r.GetKind()), r.GetName(), r.GetNamespace(), ruleIdx, matchIdx, ruleName)
+func (r *RouteInfo) UniqueRouteName(ruleIdx, matchIdx int) string {
+	return fmt.Sprintf("%s-%s-%s-%d-%d", strings.ToLower(r.GetKind()), r.GetName(), r.GetNamespace(), ruleIdx, matchIdx)
 }
 
 // GetRouteChain recursively resolves all backends for the given route object.
@@ -122,7 +114,7 @@ func (r *gatewayQueries) GetRouteChain(
 
 	switch typedRoute := route.(type) {
 	case *ir.HttpRouteIR:
-		children = r.getDelegatedChildren(kctx, ctx, parentRef, typedRoute, sets.New[types.NamespacedName]())
+		children = r.getDelegatedChildren(kctx, ctx, parentRef, typedRoute, nil)
 	case *ir.TcpRouteIR:
 		// TODO (danehans): Should TCPRoute delegation support be added in the future?
 	case *ir.TlsRouteIR:
@@ -139,7 +131,7 @@ func (r *gatewayQueries) GetRouteChain(
 	}
 }
 
-func (r *gatewayQueries) allowedRoutes(resource client.Object, l *gwv1.Listener) (func(krt.HandlerContext, string) bool, []metav1.GroupKind, error) {
+func (r *gatewayQueries) allowedRoutes(gw *gwv1.Gateway, l *gwv1.Listener) (func(krt.HandlerContext, string) bool, []metav1.GroupKind, error) {
 	var allowedKinds []metav1.GroupKind
 
 	// Determine the allowed route kinds based on the listener's protocol
@@ -147,10 +139,7 @@ func (r *gatewayQueries) allowedRoutes(resource client.Object, l *gwv1.Listener)
 	case gwv1.HTTPSProtocolType:
 		fallthrough
 	case gwv1.HTTPProtocolType:
-		allowedKinds = []metav1.GroupKind{
-			{Kind: wellknown.HTTPRouteKind, Group: gwv1.GroupName},
-			{Kind: wellknown.GRPCRouteKind, Group: gwv1.GroupName},
-		}
+		allowedKinds = []metav1.GroupKind{{Kind: wellknown.HTTPRouteKind, Group: gwv1.GroupName}}
 	case gwv1.TLSProtocolType:
 		allowedKinds = []metav1.GroupKind{{Kind: wellknown.TLSRouteKind, Group: gwv1.GroupName}}
 	case gwv1.TCPProtocolType:
@@ -162,7 +151,7 @@ func (r *gatewayQueries) allowedRoutes(resource client.Object, l *gwv1.Listener)
 		allowedKinds = []metav1.GroupKind{{Kind: wellknown.HTTPRouteKind, Group: gwv1.GroupName}}
 	}
 
-	allowedNs := krtcollections.SameNamespace(resource.GetNamespace())
+	allowedNs := SameNamespace(gw.Namespace)
 	if ar := l.AllowedRoutes; ar != nil {
 		// Override the allowed route kinds if specified in AllowedRoutes
 		if ar.Kinds != nil {
@@ -182,7 +171,7 @@ func (r *gatewayQueries) allowedRoutes(resource client.Object, l *gwv1.Listener)
 		if ar.Namespaces != nil && ar.Namespaces.From != nil {
 			switch *ar.Namespaces.From {
 			case gwv1.NamespacesFromAll:
-				allowedNs = krtcollections.AllNamespace()
+				allowedNs = AllNamespace()
 			case gwv1.NamespacesFromSelector:
 				if ar.Namespaces.Selector == nil {
 					return nil, nil, fmt.Errorf("selector must be set")
@@ -191,7 +180,7 @@ func (r *gatewayQueries) allowedRoutes(resource client.Object, l *gwv1.Listener)
 				if err != nil {
 					return nil, nil, err
 				}
-				allowedNs = krtcollections.NamespaceSelector(r.collections.Namespaces, selector)
+				allowedNs = r.NamespaceSelector(selector)
 			}
 		}
 	}
@@ -206,6 +195,10 @@ func (r *gatewayQueries) getDelegatedChildren(
 	parent *ir.HttpRouteIR,
 	visited sets.Set[types.NamespacedName],
 ) BackendMap[[]*RouteInfo] {
+	// Initialize the set of visited routes if it hasn't been initialized yet
+	if visited == nil {
+		visited = sets.New[types.NamespacedName]()
+	}
 	parentRef := namespacedName(parent)
 	// `visited` is used to detect cyclic references to routes in the delegation chain.
 	// It is important to remove the route from the set once all its children have been evaluated
@@ -225,26 +218,19 @@ func (r *gatewayQueries) getDelegatedChildren(
 			}
 			ref := *backendRef.Delegate
 			// Fetch child routes based on the backend reference
-			referencedRoutes, err := r.fetchRoutesByRef(kctx, backendRef)
+			referencedRoutes, err := r.fetchChildRoutes(kctx, backendRef)
 			if err != nil {
 				children.AddError(ref, err)
 				continue
 			}
 			for _, childRoute := range referencedRoutes {
 				childRef := namespacedName(&childRoute)
-
-				// ignore routes that are not attached to the parent
-				if !delegationutils.ChildRouteCanAttachToParentRef(childRoute.Namespace, childRoute.ParentRefs, parentRef) {
-					continue
-				}
-
 				if visited.Has(childRef) {
 					err := fmt.Errorf("ignoring child route %s for parent %s: %w", childRef, parentRef, ErrCyclicReference)
 					children.AddError(ref, err)
 					// Don't resolve invalid child route
 					continue
 				}
-
 				// Recursively get the route chain for each child route
 				routeInfo := &RouteInfo{
 					Object: &childRoute,
@@ -266,10 +252,7 @@ func (r *gatewayQueries) getDelegatedChildren(
 	return children
 }
 
-// fetchRoutesByRef fetches the routes referenced by HTTPBackendOrDelegate
-// NOTE: it DOES NOT check if the route attaches to the parent if it delegates to
-// another HTTPRoute (checked in getDelegatedChildren)
-func (r *gatewayQueries) fetchRoutesByRef(
+func (r *gatewayQueries) fetchChildRoutes(
 	kctx krt.HandlerContext,
 	backend ir.HttpBackendOrDelegate,
 ) ([]ir.HttpRouteIR, error) {
@@ -280,35 +263,18 @@ func (r *gatewayQueries) fetchRoutesByRef(
 	delegatedNs := backendRef.Namespace
 
 	var refChildren []ir.HttpRouteIR
-	// If the ref is a label selector, fetch routes by label selector
-	if isDelegationLabelSelectorRef(backendRef) {
-		selector := krtcollections.HTTPRouteSelector{
-			LabelValue: backendRef.Name,
-		}
-		// If a wildcard namespace is not specified, restrict the Fetch to the delegatedNs namespace,
-		// otherwise Fetch routes using the label selector in all namespaces
-		if delegatedNs != apilabels.DelegationLabelSelectorWildcardNamespace {
-			selector.Namespace = delegatedNs
-		}
-		routes := r.collections.Routes.FetchHTTPRoutesBySelector(kctx, selector)
+	if string(backendRef.Name) == "" || string(backendRef.Name) == "*" {
+		// Handle wildcard references by listing all HTTPRoutes in the specified namespace
+		routes := r.collections.Routes.FetchHttpNamespace(kctx, delegatedNs)
 		refChildren = append(refChildren, routes...)
 	} else {
-		if string(backendRef.Name) == "" || string(backendRef.Name) == "*" {
-			// Handle wildcard references by listing all HTTPRoutes in the specified namespace
-			routes := r.collections.Routes.FetchHTTPRoutesBySelector(kctx, krtcollections.HTTPRouteSelector{
-				Namespace: delegatedNs,
-			})
-			refChildren = append(refChildren, routes...)
-		} else {
-			// Lookup a specific child route by its name
-			route := r.collections.Routes.FetchHttp(kctx, delegatedNs, string(backendRef.Name))
-			if route == nil {
-				return nil, ErrUnresolvedReference
-			}
-			refChildren = append(refChildren, *route)
+		// Lookup a specific child route by its name
+		route := r.collections.Routes.FetchHttp(kctx, delegatedNs, string(backendRef.Name))
+		if route == nil {
+			return nil, errors.New("not found")
 		}
+		refChildren = append(refChildren, *route)
 	}
-
 	// Check if no child routes were resolved and log an error if needed
 	if len(refChildren) == 0 {
 		return nil, ErrUnresolvedReference
@@ -317,25 +283,17 @@ func (r *gatewayQueries) fetchRoutesByRef(
 	return refChildren, nil
 }
 
-func (r *gatewayQueries) GetRoutesForResource(kctx krt.HandlerContext, ctx context.Context, resource client.Object) (*RoutesForGwResult, error) {
+func (r *gatewayQueries) GetRoutesForGateway(kctx krt.HandlerContext, ctx context.Context, gw *gwv1.Gateway) (*RoutesForGwResult, error) {
 	nns := types.NamespacedName{
-		Namespace: resource.GetNamespace(),
-		Name:      resource.GetName(),
+		Namespace: gw.Namespace,
+		Name:      gw.Name,
 	}
 
 	// Process each route
 	ret := NewRoutesForGwResult()
-
-	var routes []ir.Route
-	switch resource.(type) {
-	case *gwxv1a1.XListenerSet:
-		routes = r.collections.Routes.RoutesForListenerSet(kctx, nns)
-	default:
-		routes = r.collections.Routes.RoutesForGateway(kctx, nns)
-	}
-
+	routes := r.collections.Routes.RoutesForGateway(kctx, nns)
 	for _, route := range routes {
-		if err := r.processRoute(kctx, ctx, resource, route, ret); err != nil {
+		if err := r.processRoute(kctx, ctx, gw, route, ret); err != nil {
 			return nil, err
 		}
 	}
@@ -343,66 +301,14 @@ func (r *gatewayQueries) GetRoutesForResource(kctx krt.HandlerContext, ctx conte
 	return ret, nil
 }
 
-func getParentGatewayRef(ls *gwxv1a1.XListenerSet) *types.NamespacedName {
-	ns := ls.Namespace
-	if ls.Spec.ParentRef.Namespace != nil && *ls.Spec.ParentRef.Namespace != "" {
-		ns = string(*ls.Spec.ParentRef.Namespace)
-	}
-
-	return &types.NamespacedName{
-		Namespace: ns,
-		Name:      string(ls.Spec.ParentRef.Name),
-	}
-}
-
-func (r *gatewayQueries) GetRoutesForGateway(kctx krt.HandlerContext, ctx context.Context, gw *ir.Gateway) (*RoutesForGwResult, error) {
-	routes, err := r.GetRoutesForResource(kctx, ctx, gw.Obj)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, ls := range gw.AllowedListenerSets {
-		lsRoutes, err := r.GetRoutesForResource(kctx, ctx, ls.Obj)
-		if err != nil {
-			return nil, err
-		}
-		routes.merge(lsRoutes)
-	}
-
-	return routes, nil
-}
-
-func GenerateRouteKey(parent client.Object, listenerName string) string {
-	if parent == nil {
-		return listenerName
-	}
-	if _, ok := parent.(*gwv1.Gateway); ok {
-		return listenerName
-	}
-	return fmt.Sprintf("%s/%s/%s", parent.GetNamespace(), parent.GetName(), listenerName)
-}
-
-func getListeners(resource client.Object) ([]gwv1.Listener, error) {
-	var listeners []gwv1.Listener
-	switch typed := resource.(type) {
-	case *gwv1.Gateway:
-		listeners = typed.Spec.Listeners
-	case *gwxv1a1.XListenerSet:
-		listeners = utils.ToListenerSlice(typed.Spec.Listeners)
-	default:
-		return nil, fmt.Errorf("unknown type")
-	}
-	return listeners, nil
-}
-
 func (r *gatewayQueries) processRoute(
 	kctx krt.HandlerContext,
 	ctx context.Context,
-	resource client.Object,
+	gw *gwv1.Gateway,
 	route ir.Route,
 	ret *RoutesForGwResult,
 ) error {
-	refs := getParentRefsForResource(resource, route)
+	refs := getParentRefsForGw(gw, route)
 	routeKind := route.GetGroupKind().Kind
 
 	for _, ref := range refs {
@@ -410,19 +316,14 @@ func (r *gatewayQueries) processRoute(
 		anyListenerMatched := false
 		anyHostsMatch := false
 
-		listeners, err := getListeners(resource)
-		if err != nil {
-			return err
-		}
-
-		for _, l := range listeners {
-			lr := ret.GetListenerResult(resource, string(l.Name))
+		for _, l := range gw.Spec.Listeners {
+			lr := ret.ListenerResults[string(l.Name)]
 			if lr == nil {
 				lr = &ListenerResult{}
-				ret.setListenerResult(resource, string(l.Name), lr)
+				ret.ListenerResults[string(l.Name)] = lr
 			}
 
-			allowedNs, allowedKinds, err := r.allowedRoutes(resource, &l)
+			allowedNs, allowedKinds, err := r.allowedRoutes(gw, &l)
 			if err != nil {
 				lr.Error = err
 				continue
@@ -467,16 +368,6 @@ func (r *gatewayQueries) processRoute(
 					anyHostsMatch = true
 				}
 			}
-			if routeKind == wellknown.GRPCRouteKind {
-				if gr, ok := route.(*ir.HttpRouteIR); ok {
-					var ok bool
-					ok, hostnames = hostnameIntersect(&l, gr.GetHostnames())
-					if !ok {
-						continue
-					}
-					anyHostsMatch = true
-				}
-			}
 
 			// If all checks pass, add the route to the listener result
 			lr.Routes = append(lr.Routes, r.GetRouteChain(kctx, ctx, route, hostnames, ref))
@@ -495,7 +386,7 @@ func (r *gatewayQueries) processRoute(
 				ParentRef: ref,
 				Error:     Error{E: ErrNoMatchingParent, Reason: gwv1.RouteReasonNoMatchingParent},
 			})
-		} else if (routeKind == wellknown.HTTPRouteKind || routeKind == wellknown.TLSRouteKind || routeKind == wellknown.GRPCRouteKind) && !anyHostsMatch {
+		} else if routeKind == wellknown.HTTPRouteKind && !anyHostsMatch {
 			ret.RouteErrors = append(ret.RouteErrors, &RouteError{
 				Route:     route,
 				ParentRef: ref,
@@ -524,9 +415,4 @@ type Namespaced interface {
 
 func namespacedName(o Namespaced) types.NamespacedName {
 	return types.NamespacedName{Name: o.GetName(), Namespace: o.GetNamespace()}
-}
-
-// isDelegationLabelSelectorRef checks if ObjectSource is an HTTPRoute delegation label selector
-func isDelegationLabelSelectorRef(ref ir.ObjectSource) bool {
-	return ref.Group+"/"+ref.Kind == apilabels.DelegationLabelSelector
 }

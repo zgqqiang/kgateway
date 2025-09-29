@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"slices"
 	"strings"
@@ -83,17 +82,11 @@ func (c *Cli) RunCommand(ctx context.Context, args ...string) error {
 	return c.Command(ctx, args...).Run().Cause()
 }
 
-// RunCommandToWriters runs a kubectl command directing stdout/stderr to the provided writers.
-// It does not mutate the Cli's default receiver.
-func (c *Cli) RunCommandToWriters(ctx context.Context, stdout io.Writer, stderr io.Writer, args ...string) error {
-	cmd := c.Command(ctx, args...)
-	if stdout != nil {
-		cmd = cmd.WithStdout(stdout)
-	}
-	if stderr != nil {
-		cmd = cmd.WithStderr(stderr)
-	}
-	return cmd.Run().Cause()
+// RunCommandWithOutput creates a Cmd and then runs it.
+// If an error occurred, it will be returned along with the output of the command
+func (c *Cli) RunCommandWithOutput(ctx context.Context, args ...string) (string, error) {
+	runErr := c.Command(ctx, args...).Run()
+	return runErr.OutputString(), runErr.Cause()
 }
 
 // Namespaces returns a sorted list of namespaces or an error if one occurred
@@ -320,28 +313,8 @@ func (c *Cli) CurlFromPod(ctx context.Context, podOpts PodExecOptions, options .
 	}, curlArgs...)
 
 	stdout, stderr, err := c.ExecuteOn(ctx, c.kubeContext, args...)
-	log.Printf("executing curl with args: %s", argsQuotedForShell(args))
 
 	return &CurlResponse{StdOut: stdout, StdErr: stderr}, err
-}
-
-func argsQuotedForShell(args []string) string {
-	var builder strings.Builder
-	for i, arg := range args {
-		if i > 0 {
-			builder.WriteString(" ")
-		}
-		if strings.Contains(arg, "'") {
-			builder.WriteString(fmt.Sprintf("%q", arg))
-		} else if strings.Contains(arg, " ") || strings.Contains(arg, "\"") || arg == "" {
-			builder.WriteString("'")
-			builder.WriteString(arg)
-			builder.WriteString("'")
-		} else {
-			builder.WriteString(arg)
-		}
-	}
-	return builder.String()
 }
 
 func (c *Cli) ExecuteOn(ctx context.Context, kubeContext string, args ...string) (string, string, error) {
@@ -430,11 +403,4 @@ func (c *Cli) GetPodsInNsWithLabel(ctx context.Context, namespace string, label 
 	// Split the string on whitespace to get the pod names
 	glooPodNames := strings.Fields(glooPodNamesString)
 	return glooPodNames, nil
-}
-
-func (c *Cli) GetLeaseHolder(ctx context.Context, namespace string, leaderElectionID string) (string, error) {
-	stdout, stderr, err := c.Execute(ctx, "get", "leases", "-n", namespace,
-		leaderElectionID, "--output", "jsonpath='{.spec.holderIdentity}'")
-	stdout = strings.Trim(stdout, "'")
-	return stdout + stderr, err
 }

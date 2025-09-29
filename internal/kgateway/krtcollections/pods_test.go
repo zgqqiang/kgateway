@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/onsi/gomega"
 	. "github.com/onsi/gomega"
 	"istio.io/istio/pkg/kube/krt"
 	"istio.io/istio/pkg/kube/krt/krttest"
@@ -12,14 +13,15 @@ import (
 
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/krtcollections"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/krtutil"
+	. "github.com/kgateway-dev/kgateway/v2/internal/kgateway/krtcollections"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/utils/krtutil"
 )
 
 func TestPods(t *testing.T) {
 	testCases := []struct {
 		name   string
 		inputs []any
-		result krtcollections.LocalityPod
+		result LocalityPod
 	}{
 		{
 			name: "basic",
@@ -48,7 +50,7 @@ func TestPods(t *testing.T) {
 					},
 				},
 			},
-			result: krtcollections.LocalityPod{
+			result: LocalityPod{
 				Named: krt.Named{
 					Name:      "name",
 					Namespace: "ns",
@@ -61,7 +63,6 @@ func TestPods(t *testing.T) {
 				AugmentedLabels: map[string]string{
 					corev1.LabelTopologyRegion: "region",
 					corev1.LabelTopologyZone:   "zone",
-					corev1.LabelHostname:       "node",
 					"a":                        "b",
 				},
 				Addresses: []string{"1.2.3.4"},
@@ -98,7 +99,7 @@ func TestPods(t *testing.T) {
 					},
 				},
 			},
-			result: krtcollections.LocalityPod{
+			result: LocalityPod{
 				Named: krt.Named{
 					Name:      "name",
 					Namespace: "ns",
@@ -111,7 +112,6 @@ func TestPods(t *testing.T) {
 				AugmentedLabels: map[string]string{
 					corev1.LabelTopologyRegion: "region",
 					corev1.LabelTopologyZone:   "zone",
-					corev1.LabelHostname:       "node",
 					"a":                        "b",
 				},
 				Addresses: []string{"1.2.3.4", "2001:db8::1"},
@@ -141,7 +141,7 @@ func TestPods(t *testing.T) {
 					},
 				},
 			},
-			result: krtcollections.LocalityPod{
+			result: LocalityPod{
 				Named: krt.Named{
 					Name:      "name",
 					Namespace: "ns",
@@ -154,7 +154,6 @@ func TestPods(t *testing.T) {
 				AugmentedLabels: map[string]string{
 					corev1.LabelTopologyRegion: "region",
 					corev1.LabelTopologyZone:   "zone",
-					corev1.LabelHostname:       "node",
 					"a":                        "b",
 				},
 			},
@@ -163,7 +162,7 @@ func TestPods(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			g := NewWithT(t)
+			g := gomega.NewWithT(t)
 			mock := krttest.NewMock(t, tc.inputs)
 			nodes := krtcollections.NewNodeMetadataCollection(krttest.GetMockCollection[*corev1.Node](mock))
 			pods := krtcollections.NewLocalityPodsCollection(nodes, krttest.GetMockCollection[*corev1.Pod](mock), krtutil.KrtOptions{})

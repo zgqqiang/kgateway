@@ -1,3 +1,5 @@
+//go:build ignore
+
 package assertions
 
 import (
@@ -21,24 +23,12 @@ import (
 //
 // Example usage:
 // BeforeEach(func() {
-//	monitor = NewGoRoutineMonitor()
+//	monitor := NewGoRoutineMonitor()
 //	...
 // }
 //
 // AfterEach(func() {
-// // This example is from the controller tests. Different tests may have different allowed routines.
-// // The way to figure out what routines to allow is to run the test with the goroutine leak detector enabled
-// // and examining the reported goroutines if/when it fails. Those routines can be individually examined and
-// // either added to the list or somehow mitigated (longer timeout, passing context to the goroutine)
-// var allowedRoutines = []types.GomegaMatcher{
-// 	gleak.IgnoringTopFunction("sync.runtime_notifyListWait [sync.Cond.Wait]"),
-// 	gleak.IgnoringTopFunction("istio.io/istio/pkg/kube/krt.(*processorListener[...]).run [select]"),
-// 	gleak.IgnoringTopFunction("istio.io/istio/pkg/kube/krt.(*processorListener[...]).pop [select]"),
-// 	gleak.IgnoringTopFunction(`istio.io/istio/pkg/queue.(*queueImpl).Run.func2 [chan receive]`),
-// }
-//  monitor.AssertNoLeaks(&AssertNoLeaksArgs{
-//		AllowedRoutines: allowedRoutines,
-//	})
+//  monitor.ExpectNoLeaks(helpers.CommonLeakOptions...)
 // }
 
 type GoRoutineMonitor struct {
@@ -52,7 +42,7 @@ func NewGoRoutineMonitor() *GoRoutineMonitor {
 	}
 }
 
-type AssertNoLeaksArgs struct {
+type ExpectNoLeaksArgs struct {
 	// Goroutines to ignore in addition to those stored in the GoroutineMonitor's goroutines field. See CommonLeakOptions for example.
 	AllowedRoutines []types.GomegaMatcher
 	// Additional arguments to pass to Eventually to control the timeout/polling interval.
@@ -65,7 +55,7 @@ var (
 	getEventuallyTimings     = helpers.GetEventuallyTimingsTransform(defaultEventuallyTimeout)
 )
 
-func (m *GoRoutineMonitor) AssertNoLeaks(args *AssertNoLeaksArgs) {
+func (m *GoRoutineMonitor) ExpectNoLeaks(args *ExpectNoLeaksArgs) {
 	// Need to gather up the arguments to pass to the leak detector, so need to make sure they are all interface{}s
 	// Arguments are the initial goroutines, and any additional allowed goroutines passed in
 	notLeaks := make([]interface{}, len(args.AllowedRoutines)+1)
@@ -82,4 +72,11 @@ func (m *GoRoutineMonitor) AssertNoLeaks(args *AssertNoLeaksArgs) {
 			notLeaks...,
 		),
 	)
+}
+
+// CommonLeakOptions are options to ignore in the goroutine leak detector
+// If we are running tests, we will likely have the test framework running and will expect to see these goroutines
+var CommonLeakOptions = []types.GomegaMatcher{
+	gleak.IgnoringTopFunction("os/exec..."),
+	gleak.IgnoringTopFunction("internal/poll.runtime_pollWait"),
 }

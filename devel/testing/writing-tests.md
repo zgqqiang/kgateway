@@ -13,7 +13,7 @@
 ## Conventions
 - All new packages and most new significant functionality must come with unit tests
 - Table-driven tests are preferred for testing multiple scenarios/inputs
-- Significant features should come with [kubernetes end-to-end (test/kubernetes/e2e) tests](/test/kubernetes/e2e/README.md)
+- Significant features should come with [end-to-end (test/e2e) tests](e2e-tests.md) and/or [kubernetes end-to-end (test/kube2e) tests](kube-e2e-tests.md)
 - Tests which are platform-dependent, should be marked as such using [test requirements](/test/testutils/requirements.go)
 
 ## Matchers
@@ -85,7 +85,14 @@ or
 ```go
 Expect(err).To(MatchError(ErrorFunc("expected error"))
 ```
-
+or
+```go
+Expect(err).To(MatchError(GlobalError))
+```
+or
+```go
+Expect(err).To(MatchError(ErrorFunc("expected error"))
+```
 
 ### Prefer Assertion Descriptions
 Sometimes you will see:
@@ -106,7 +113,7 @@ Expect(response).To(HaveHttpResponse(&HttpResponse{
     StatusCode: http.StatusOK, 
     Body: gomega.ContainSubstring("body substring"), 
     Headers: map[string]interface{}{
-        "x-kgateway-resp-hdr1": Equal("test"),
+        "x-solo-resp-hdr1": Equal("test"),
     }, 
     Custom: // your custom match logic,
 }))

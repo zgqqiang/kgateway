@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 
+	errors "github.com/rotisserie/eris"
+
 	"github.com/avast/retry-go/v4"
 )
 
@@ -54,7 +56,7 @@ func (c *cliPortForwarder) startOnce(ctx context.Context) error {
 	}
 
 	cmdCtx, cmdCancel := context.WithCancel(ctx)
-	c.cmd = exec.CommandContext( //nolint:gosec // G204: kubectl port-forward with controlled parameters from port forwarder config
+	c.cmd = exec.CommandContext(
 		cmdCtx,
 		"kubectl",
 		"port-forward",
@@ -99,7 +101,7 @@ func (c *cliPortForwarder) startOnce(ctx context.Context) error {
 	// If we get here, we didn't get any stdout, so grab stderr and return it as error
 	stdErr := bufio.NewScanner(fwdErr)
 	stdErr.Scan()
-	return fmt.Errorf("failed to start port-forward: %s", stdErr.Text())
+	return errors.Errorf("failed to start port-forward: %s", stdErr.Text())
 }
 
 func (c *cliPortForwarder) Address() string {
@@ -124,14 +126,14 @@ func (c *cliPortForwarder) WaitForStop() {
 }
 
 func getFreePort() (int, error) {
-	l, err := net.Listen("tcp", ":0") //nolint:gosec // G102: Binding to all interfaces is intentional for finding free port
+	l, err := net.Listen("tcp", ":0")
 	if err != nil {
 		return 0, err
 	}
 	defer l.Close()
 	tcpAddr, ok := l.Addr().(*net.TCPAddr)
 	if !ok {
-		return 0, fmt.Errorf("Error occurred looking for an open tcp port")
+		return 0, errors.Errorf("Error occurred looking for an open tcp port")
 	}
 	return tcpAddr.Port, nil
 }

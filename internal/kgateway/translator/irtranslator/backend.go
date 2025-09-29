@@ -5,52 +5,38 @@ import (
 	"errors"
 	"time"
 
-	envoyclusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
-	envoycorev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
-	envoyendpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	endpointv3 "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	envoy_upstreams_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"istio.io/istio/pkg/kube/krt"
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/sets"
 
-	"github.com/kgateway-dev/kgateway/v2/api/settings"
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/endpoints"
+	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/common"
+	extensionsplug "github.com/kgateway-dev/kgateway/v2/internal/kgateway/extensions2/plugin"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/ir"
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/utils"
-	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/wellknown"
-	sdk "github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk"
-	"github.com/kgateway-dev/kgateway/v2/pkg/pluginsdk/collections"
-	"github.com/kgateway-dev/kgateway/v2/pkg/validator"
-	"github.com/kgateway-dev/kgateway/v2/pkg/xds/bootstrap"
 )
 
-const clusterConnectionTimeout = time.Second * 5
+var (
+	ClusterConnectionTimeout = time.Second * 5
+)
 
 type BackendTranslator struct {
 	ContributedBackends map[schema.GroupKind]ir.BackendInit
-	ContributedPolicies map[schema.GroupKind]sdk.PolicyPlugin
-	CommonCols          *collections.CommonCollections
-	Validator           validator.Validator
-	Mode                settings.RouteReplacementMode
+	ContributedPolicies map[schema.GroupKind]extensionsplug.PolicyPlugin
+	CommonCols          *common.CommonCollections
 }
 
-// TranslateBackend translates a BackendObjectIR to an Envoy Cluster. If we encounter any
-// errors during translation, a blackhole cluster is returned along with the error. The error
-// return value is what matters as consumers (internal/kgateway/proxy_syncer/perclient.go) will
-// drop errored clusters from the xDS snapshot and track them separately for status reporting.
-// The blackhole cluster itself is not sent to Envoy but provides a consistent return structure.
 func (t *BackendTranslator) TranslateBackend(
-	ctx context.Context,
 	kctx krt.HandlerContext,
 	ucc ir.UniqlyConnectedClient,
-	backend *ir.BackendObjectIR,
-) (*envoyclusterv3.Cluster, error) {
-	// defensive checks that the backend is supported and has a plugin that can translate it.
+	backend ir.BackendObjectIR,
+) (*clusterv3.Cluster, error) {
 	gk := schema.GroupKind{
 		Group: backend.Group,
 		Kind:  backend.Kind,
@@ -59,36 +45,28 @@ func (t *BackendTranslator) TranslateBackend(
 	if !ok {
 		return nil, errors.New("no backend translator found for " + gk.String())
 	}
-	if process.InitEnvoyBackend == nil {
+
+	if process.InitBackend == nil {
 		return nil, errors.New("no backend plugin found for " + gk.String())
 	}
 
-	// Check for pre-existing errors in the Backend IR before starting translation.
-	// Exit translation early if we have errors
 	if backend.Errors != nil {
-		logger.Error("backend has pre-existing errors", "backend", backend.Name, "errors", backend.Errors)
-		return buildBlackholeCluster(backend), errors.Join(backend.Errors...)
+		// the backend has errors so we can't translate our real cluster
+		// so return a blackhole cluster instead. (in case a consumer attempts to use it)
+		// also return the errors to signify to callers it's not a dev error but a real error
+		// from backend object translation.
+		// this cluster will ultimately be dropped before it added to the xDS snapshot
+		// see: internal/kgateway/proxy_syncer/perclient.go
+		out := buildBlackholeCluster(&backend)
+		return out, errors.Join(backend.Errors...)
 	}
 
-	// Initialize the cluster with minimal configuration
 	out := initializeCluster(backend)
-	inlineEps := process.InitEnvoyBackend(ctx, *backend, out)
+	process.InitBackend(context.TODO(), backend, out)
 	processDnsLookupFamily(out, t.CommonCols)
 
-	// Apply policies to the computed cluster
-	if err := t.runPolicies(kctx, ctx, ucc, backend, inlineEps, out); err != nil {
-		logger.Error("failed to apply policies to cluster", "cluster", out.GetName(), "error", err)
-		return buildBlackholeCluster(backend), err
-	}
-
-	// In strict mode, validate the final cluster configuration using Envoy
-	if t.Mode == settings.RouteReplacementStrict && t.Validator != nil {
-		if err := t.validateClusterConfig(ctx, out); err != nil {
-			logger.Error("cluster failed xDS validation in strict mode", "cluster", out.GetName(), "error", err)
-			return buildBlackholeCluster(backend), err
-		}
-	}
-
+	// now process backend policies
+	t.runPolicies(kctx, context.TODO(), ucc, backend, out)
 	return out, nil
 }
 
@@ -96,20 +74,9 @@ func (t *BackendTranslator) runPolicies(
 	kctx krt.HandlerContext,
 	ctx context.Context,
 	ucc ir.UniqlyConnectedClient,
-	backend *ir.BackendObjectIR,
-	inlineEps *ir.EndpointsForBackend,
-	out *envoyclusterv3.Cluster,
-) error {
-	// if the backend was initialized with inlineEps then we
-	// need an EndpointsInputs to run plugins against
-	var endpointInputs *endpoints.EndpointsInputs
-	if inlineEps != nil {
-		endpointInputs = &endpoints.EndpointsInputs{
-			EndpointsForBackend: *inlineEps,
-		}
-	}
-
-	var errs []error
+	backend ir.BackendObjectIR,
+	out *clusterv3.Cluster,
+) {
 	for gk, policyPlugin := range t.ContributedPolicies {
 		// TODO: in theory it would be nice to do `ProcessBackend` once, and only do
 		// the the per-client processing for each client.
@@ -117,101 +84,50 @@ func (t *BackendTranslator) runPolicies(
 		// now, until we have more backend plugin examples to properly understand what it should look
 		// like.
 		if policyPlugin.PerClientProcessBackend != nil {
-			policyPlugin.PerClientProcessBackend(kctx, ctx, ucc, *backend, out)
+			policyPlugin.PerClientProcessBackend(kctx, ctx, ucc, backend, out)
 		}
-		// run endpoint plugins if we have endpoints to process
-		if endpointInputs != nil && policyPlugin.PerClientProcessEndpoints != nil {
-			policyPlugin.PerClientProcessEndpoints(kctx, ctx, ucc, endpointInputs)
-		}
-		// if the policy plugin has no ProcessBackend function, skip it
+
 		if policyPlugin.ProcessBackend == nil {
 			continue
 		}
-		// apply plugins to the backend. we want to skip applying the plugin if the
-		// attached IR encountered any errors during construction.
 		for _, polAttachment := range backend.AttachedPolicies.Policies[gk] {
-			if len(polAttachment.Errors) > 0 {
-				logger.Error("policy has errors", "gk", gk, "errors", polAttachment.Errors, "policyRef", polAttachment.PolicyRef)
-				errs = append(errs, polAttachment.Errors...)
-				continue
-			}
-			policyPlugin.ProcessBackend(ctx, polAttachment.PolicyIr, *backend, out)
+			policyPlugin.ProcessBackend(ctx, polAttachment.PolicyIr, backend, out)
 		}
 	}
-
-	// for clusters that want a CLA _and_ initialized with inlineEps, build the CLA.
-	// never overwrite the CLA that was already initialized (potentially within a plugin).
-	if out.GetLoadAssignment() == nil && endpointInputs != nil && clusterSupportsInlineCLA(out) {
-		out.LoadAssignment = endpoints.PrioritizeEndpoints(
-			logger,
-			ucc,
-			*endpointInputs,
-		)
-	}
-
-	return errors.Join(errs...)
 }
 
-// validateClusterConfig validates an individual cluster configuration using Envoy's
-// validation. This catches configuration errors that would cause Envoy data plane NACKs,
-// such as invalid cipher suites, invalid TLS parameters, etc.
-func (t *BackendTranslator) validateClusterConfig(ctx context.Context, cluster *envoyclusterv3.Cluster) error {
-	builder := bootstrap.New()
-	builder.AddCluster(cluster)
-	bootstrap, err := builder.Build()
-	if err != nil {
-		return err
-	}
-	data, err := protojson.Marshal(bootstrap)
-	if err != nil {
-		return err
-	}
-	if err := t.Validator.Validate(ctx, string(data)); err != nil {
-		return err
-	}
-	return nil
-}
-
-var inlineCLAClusterTypes = sets.New(
-	envoyclusterv3.Cluster_STATIC,
-	envoyclusterv3.Cluster_STRICT_DNS,
-	envoyclusterv3.Cluster_LOGICAL_DNS,
-)
-
-func clusterSupportsInlineCLA(cluster *envoyclusterv3.Cluster) bool {
-	return inlineCLAClusterTypes.Has(cluster.GetType())
-}
-
-var h2Options = func() *anypb.Any {
-	http2ProtocolOptions := &envoy_upstreams_v3.HttpProtocolOptions{
-		UpstreamProtocolOptions: &envoy_upstreams_v3.HttpProtocolOptions_ExplicitHttpConfig_{
-			ExplicitHttpConfig: &envoy_upstreams_v3.HttpProtocolOptions_ExplicitHttpConfig{
-				ProtocolConfig: &envoy_upstreams_v3.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{
-					Http2ProtocolOptions: &envoycorev3.Http2ProtocolOptions{},
+var (
+	h2Options = func() *anypb.Any {
+		http2ProtocolOptions := &envoy_upstreams_v3.HttpProtocolOptions{
+			UpstreamProtocolOptions: &envoy_upstreams_v3.HttpProtocolOptions_ExplicitHttpConfig_{
+				ExplicitHttpConfig: &envoy_upstreams_v3.HttpProtocolOptions_ExplicitHttpConfig{
+					ProtocolConfig: &envoy_upstreams_v3.HttpProtocolOptions_ExplicitHttpConfig_Http2ProtocolOptions{
+						Http2ProtocolOptions: &envoy_config_core_v3.Http2ProtocolOptions{},
+					},
 				},
 			},
-		},
-	}
+		}
 
-	a, err := utils.MessageToAny(http2ProtocolOptions)
-	if err != nil {
-		// should never happen - all values are known ahead of time.
-		panic(err)
-	}
-	return a
-}()
+		a, err := utils.MessageToAny(http2ProtocolOptions)
+		if err != nil {
+			// should never happen - all values are known ahead of time.
+			panic(err)
+		}
+		return a
+	}()
+)
 
 // processDnsLookupFamily modifies clusters that use DNS-based discovery in the following way:
 // 1. explicitly default to 'V4_PREFERRED' (as opposed to the envoy default of effectively V6_PREFERRED)
 // 2. override to value defined in kgateway global setting if present
-func processDnsLookupFamily(out *envoyclusterv3.Cluster, cc *collections.CommonCollections) {
-	cdt, ok := out.GetClusterDiscoveryType().(*envoyclusterv3.Cluster_Type)
+func processDnsLookupFamily(out *clusterv3.Cluster, cc *common.CommonCollections) {
+	cdt, ok := out.GetClusterDiscoveryType().(*clusterv3.Cluster_Type)
 	if !ok {
 		return
 	}
 	setDns := false
 	switch cdt.Type {
-	case envoyclusterv3.Cluster_STATIC, envoyclusterv3.Cluster_LOGICAL_DNS, envoyclusterv3.Cluster_STRICT_DNS:
+	case clusterv3.Cluster_STATIC, clusterv3.Cluster_LOGICAL_DNS, clusterv3.Cluster_STRICT_DNS:
 		setDns = true
 	}
 	if !setDns {
@@ -219,23 +135,23 @@ func processDnsLookupFamily(out *envoyclusterv3.Cluster, cc *collections.CommonC
 	}
 
 	// irrespective of settings, default to V4_PREFERRED, overriding Envoy default
-	out.DnsLookupFamily = envoyclusterv3.Cluster_V4_PREFERRED
+	out.DnsLookupFamily = clusterv3.Cluster_V4_PREFERRED
 
 	if cc == nil {
 		return
 	}
 	// if we have settings, use value from it
 	switch cc.Settings.DnsLookupFamily {
-	case settings.DnsLookupFamilyV4Preferred:
-		out.DnsLookupFamily = envoyclusterv3.Cluster_V4_PREFERRED
-	case settings.DnsLookupFamilyV4Only:
-		out.DnsLookupFamily = envoyclusterv3.Cluster_V4_ONLY
-	case settings.DnsLookupFamilyV6Only:
-		out.DnsLookupFamily = envoyclusterv3.Cluster_V6_ONLY
-	case settings.DnsLookupFamilyAuto:
-		out.DnsLookupFamily = envoyclusterv3.Cluster_AUTO
-	case settings.DnsLookupFamilyAll:
-		out.DnsLookupFamily = envoyclusterv3.Cluster_ALL
+	case "V4_PREFERRED":
+		out.DnsLookupFamily = clusterv3.Cluster_V4_PREFERRED
+	case "V4_ONLY":
+		out.DnsLookupFamily = clusterv3.Cluster_V4_ONLY
+	case "V6_ONLY":
+		out.DnsLookupFamily = clusterv3.Cluster_V6_ONLY
+	case "AUTO":
+		out.DnsLookupFamily = clusterv3.Cluster_AUTO
+	case "ALL":
+		out.DnsLookupFamily = clusterv3.Cluster_ALL
 	}
 }
 
@@ -250,39 +166,54 @@ func translateAppProtocol(appProtocol ir.AppProtocol) map[string]*anypb.Any {
 
 // initializeCluster creates a default envoy cluster with minimal configuration,
 // that will then be augmented by various backend plugins
-func initializeCluster(b *ir.BackendObjectIR) *envoyclusterv3.Cluster {
-	out := &envoyclusterv3.Cluster{
-		Name:                          b.ClusterName(),
-		Metadata:                      new(envoycorev3.Metadata),
-		ConnectTimeout:                durationpb.New(clusterConnectionTimeout),
-		TypedExtensionProtocolOptions: translateAppProtocol(b.AppProtocol),
-		CommonLbConfig:                createCommonLbConfig(b),
+func initializeCluster(u ir.BackendObjectIR) *clusterv3.Cluster {
+	// circuitBreakers := t.settings.GetGloo().GetCircuitBreakers()
+	out := &clusterv3.Cluster{
+		Name:     u.ClusterName(),
+		Metadata: new(envoy_config_core_v3.Metadata),
+		//	CircuitBreakers:  getCircuitBreakers(upstream.GetCircuitBreakers(), circuitBreakers),
+		//	LbSubsetConfig:   createLbConfig(upstream),
+		//	HealthChecks:     hcConfig,
+		//		OutlierDetection: detectCfg,
+		// defaults to Cluster_USE_CONFIGURED_PROTOCOL
+		// ProtocolSelection: envoy_config_cluster_v3.Cluster_ClusterProtocolSelection(upstream.GetProtocolSelection()),
+		// this field can be overridden by plugins
+		ConnectTimeout:                durationpb.New(ClusterConnectionTimeout),
+		TypedExtensionProtocolOptions: translateAppProtocol(u.AppProtocol),
+
+		// Http2ProtocolOptions:      getHttp2options(upstream),
+		// IgnoreHealthOnHostRemoval: upstream.GetIgnoreHealthOnHostRemoval().GetValue(),
+		//	RespectDnsTtl:             upstream.GetRespectDnsTtl().GetValue(),
+		//	DnsRefreshRate:            dnsRefreshRate,
+		//	PreconnectPolicy:          preconnect,
 	}
+
+	// proxyprotocol may be wiped by some plugins that transform transport sockets
+	// see static and failover at time of writing.
+	//	if upstream.GetProxyProtocolVersion() != nil {
+	//
+	//		tp, err := upstream_proxy_protocol.WrapWithPProtocol(out.GetTransportSocket(), upstream.GetProxyProtocolVersion().GetValue())
+	//		if err != nil {
+	//			errorList = append(errorList, err)
+	//		} else {
+	//			out.TransportSocket = tp
+	//		}
+	//	}
+	//
 	return out
 }
 
-func buildBlackholeCluster(b *ir.BackendObjectIR) *envoyclusterv3.Cluster {
-	out := &envoyclusterv3.Cluster{
-		Name:     b.ClusterName(),
-		Metadata: new(envoycorev3.Metadata),
-		ClusterDiscoveryType: &envoyclusterv3.Cluster_Type{
-			Type: envoyclusterv3.Cluster_STATIC,
+func buildBlackholeCluster(u *ir.BackendObjectIR) *clusterv3.Cluster {
+	out := &clusterv3.Cluster{
+		Name:     u.ClusterName(),
+		Metadata: new(envoy_config_core_v3.Metadata),
+		ClusterDiscoveryType: &clusterv3.Cluster_Type{
+			Type: clusterv3.Cluster_STATIC,
 		},
-		LoadAssignment: &envoyendpointv3.ClusterLoadAssignment{
-			ClusterName: b.ClusterName(),
-			Endpoints:   []*envoyendpointv3.LocalityLbEndpoints{},
+		LoadAssignment: &endpointv3.ClusterLoadAssignment{
+			ClusterName: u.ClusterName(),
+			Endpoints:   []*endpointv3.LocalityLbEndpoints{},
 		},
 	}
 	return out
-}
-
-func createCommonLbConfig(b *ir.BackendObjectIR) *envoyclusterv3.Cluster_CommonLbConfig {
-	if b.TrafficDistribution != wellknown.TrafficDistributionAny {
-		return &envoyclusterv3.Cluster_CommonLbConfig{
-			LocalityConfigSpecifier: &envoyclusterv3.Cluster_CommonLbConfig_LocalityWeightedLbConfig_{
-				LocalityWeightedLbConfig: &envoyclusterv3.Cluster_CommonLbConfig_LocalityWeightedLbConfig{},
-			},
-		}
-	}
-	return nil
 }

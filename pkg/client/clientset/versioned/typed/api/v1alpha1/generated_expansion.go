@@ -4,8 +4,6 @@ package v1alpha1
 
 type BackendExpansion interface{}
 
-type BackendConfigPolicyExpansion interface{}
-
 type DirectResponseExpansion interface{}
 
 type GatewayExtensionExpansion interface{}

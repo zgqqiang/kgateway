@@ -5,12 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
+	"os"
 	"sort"
-	"time"
 
 	envoycache "github.com/envoyproxy/go-control-plane/pkg/cache/v3"
+	"github.com/solo-io/go-utils/contextutils"
 	"istio.io/istio/pkg/kube/krt"
 
 	"github.com/kgateway-dev/kgateway/v2/internal/kgateway/controller"
@@ -20,6 +20,11 @@ import (
 func RunAdminServer(ctx context.Context, setupOpts *controller.SetupOpts) error {
 	// serverHandlers defines the custom handlers that the Admin Server will support
 	serverHandlers := getServerHandlers(ctx, setupOpts.KrtDebugger, setupOpts.Cache)
+
+	// initialize the atomic log level
+	if envLogLevel := os.Getenv(contextutils.LogLevelEnvName); envLogLevel != "" {
+		contextutils.SetLogLevelFromString(envLogLevel)
+	}
 
 	startHandlers(ctx, serverHandlers)
 
@@ -81,17 +86,16 @@ func startHandlers(ctx context.Context, addHandlers ...func(mux *http.ServeMux, 
 	mux.HandleFunc("/", idx)
 	mux.HandleFunc("/snapshots/", idx)
 	server := &http.Server{
-		Addr:              fmt.Sprintf("localhost:%d", wellknown.KgatewayAdminPort),
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
+		Addr:    fmt.Sprintf("localhost:%d", wellknown.KgatewayAdminPort),
+		Handler: mux,
 	}
-	slog.Info("admin server starting", "address", server.Addr)
+	contextutils.LoggerFrom(ctx).Infof("Admin server starting at %s", server.Addr)
 	go func() {
 		err := server.ListenAndServe()
 		if err == http.ErrServerClosed {
-			slog.Info("admin server closed")
+			contextutils.LoggerFrom(ctx).Infof("Admin server closed")
 		} else {
-			slog.Warn("admin server closed with unexpected error", "error", err)
+			contextutils.LoggerFrom(ctx).Warnf("Admin server closed with unexpected error: %v", err)
 		}
 	}()
 	go func() {
@@ -99,7 +103,7 @@ func startHandlers(ctx context.Context, addHandlers ...func(mux *http.ServeMux, 
 		if server != nil {
 			err := server.Close()
 			if err != nil {
-				slog.Warn("admin server shutdown returned error", "error", err)
+				contextutils.LoggerFrom(ctx).Warnf("Admin server shutdown returned error: %v", err)
 			}
 		}
 	}()
