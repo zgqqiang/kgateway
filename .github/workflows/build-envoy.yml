@@ -20,7 +20,7 @@ on:
 
 jobs:
   envoy:
-    runs-on: [ ubuntu-22.04, linux, arm64 ]
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout kgateway
         uses: actions/checkout@v4
