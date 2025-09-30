@@ -135,6 +135,12 @@ jobs:
             ENVOYINIT_IMAGE_REPO=kgateway-arm64 \
             VERSION=kgateway-envoy-wrapper-${{ github.event.inputs.image_tag }}
 
+      - name: Docker Login
+        uses: docker/login-action@v3.4.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PASSWD }}
+
       - name: Tag & push final wrapper image
         run: |
           FINAL=docker.io/${{ secrets.DOCKERHUB_USER }}/kgateway-arm64:kgateway-envoy-wrapper-${{ github.event.inputs.image_tag }}
