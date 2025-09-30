@@ -43,6 +43,7 @@ jobs:
         working-directory: envoy-gloo
         run: |
           sed -i 's|x86/bin/release.tar.zst|arm64/bin/release.tar.zst|g' ci/do_ci.sh
+          cat ci/do_ci.sh
           cat > ci/Dockerfile-arm <<'EOF'
           FROM ubuntu:focal
           ENV loglevel=info
