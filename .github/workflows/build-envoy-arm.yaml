@@ -125,7 +125,7 @@ jobs:
       - name: Build envoy-wrapper with new envoy binary
         working-directory: kgateway
         run: |
-          sed -i 's|ghcr.io/rust-cross/cargo-zigbuild:0.19.88@sha256:a00024c136a365171892a186b1ee5552812a8f91f2ba9f5fe609c0d352238cca|ghcr.io/rust-cross/cargo-zigbuild:0.19.8|g' ci/do_ci.sh
+          sed -i 's|ghcr.io/rust-cross/cargo-zigbuild:0.19.88@sha256:a00024c136a365171892a186b1ee5552812a8f91f2ba9f5fe609c0d352238cca|ghcr.io/rust-cross/cargo-zigbuild:0.19.8|g' internal/envoyinit/Dockerfile.envoyinit
           # 使用上一步编译并推送的 envoy 镜像作为 ENVOY_IMAGE
           ENVOY_IMAGE=docker.io/${{ secrets.DOCKERHUB_USER }}/kgateway-arm64:envoy-${{ env.ENVOY_GLOO_REF }}
           make envoy-wrapper-docker \
