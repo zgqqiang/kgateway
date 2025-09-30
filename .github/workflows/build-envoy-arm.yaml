@@ -1,4 +1,4 @@
-name: Build-Envoy-ARM64（完整链路·零脚本）
+name: Build-Envoy-ARM64
 
 env:
   ENVOY_GLOO_REF: "v1.34.0-patch0"
@@ -94,11 +94,10 @@ jobs:
         id: build
         run: |
           . ci/envoy_build_sha.sh
-          export IMAGE_NAME="docker.io/${{ secrets.DOCKERHUB_USER }}/kgateway-arm64"
-          export IMAGE_ID="envoy-${ENVOY_BUILD_SHA}"
-          echo "build_image=${IMAGE_NAME}:${IMAGE_ID}" >> $GITHUB_OUTPUT
-          echo "${IMAGE_NAME}"
-          echo "${IMAGE_ID}"
+          echo "build_image=envoyproxy/envoy-build-ubuntu:${ENVOY_BUILD_SHA}" >> $GITHUB_OUTPUT
+          echo "===== 构建镜像名 ====="
+          echo "envoyproxy/envoy-build-ubuntu:${ENVOY_BUILD_SHA}"
+          echo "=========================="
           make fast-build-arm
 
       - name: Docker Login
@@ -109,7 +108,9 @@ jobs:
 
       - name: Tag & push build image
         run: |
-          DST=${{ steps.build.outputs.build_image }}
+          SRC=${{ steps.build.outputs.build_image }}
+          DST=docker.io/${{ secrets.DOCKERHUB_USER }}/kgateway-arm64:envoy-${{ env.ENVOY_GLOO_REF }}
+          docker tag "$SRC" "$DST"
           docker push "$DST"
           echo "✅ 已推送 build 镜像：$DST"
 
