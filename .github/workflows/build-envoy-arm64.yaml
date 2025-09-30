@@ -1,0 +1,142 @@
+name: Build-Envoy-ARM64（完整链路·零脚本）
+
+env:
+  ENVOY_GLOO_REF: "v1.34.0-patch0"
+  GO_VERSION: "1.24.1"
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '上游分支或tag (例: v2.0.0 / main)'
+        required: true
+        default: 'v2.0.0'
+      image_tag:
+        description: '最终镜像 tag (例: v2.0.0-arm / latest)'
+        required: true
+        default: 'v2.0.0'
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      hit: ${{ steps.exist.outputs.hit }}
+    steps:
+      - name: Check if build image already exists
+        id: exist
+        run: |
+          TOKEN=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"username":"${{ secrets.DOCKERHUB_USER }}","password":"${{ secrets.DOCKERHUB_PASSWD }}"}' \
+            https://hub.docker.com/v2/users/login/ | jq -r .token)
+
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: JWT $TOKEN" \
+            https://hub.docker.com/v2/repositories/${{ secrets.DOCKERHUB_USER }}/kgateway-arm64/tags/envoy-${{ env.ENVOY_GLOO_REF }}/)
+
+          if [ "$CODE" = "200" ]; then
+            echo "✅ 构建镜像已存在，跳过编译"
+            echo "hit=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ 构建镜像不存在，需要编译"
+            echo "hit=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.hit == 'false'
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      build_image: ${{ steps.build.outputs.build_image }}
+    steps:
+      - name: Checkout kgateway
+        uses: actions/checkout@v4
+        with:
+          repository: kgateway-dev/kgateway
+          ref: ${{ github.event.inputs.ref }}
+          path: kgateway
+
+      - name: Checkout envoy-gloo
+        uses: actions/checkout@v4
+        with:
+          repository: solo-io/envoy-gloo
+          ref: ${{ env.ENVOY_GLOO_REF }}
+          path: envoy-gloo
+
+      - name: Install Go
+        run: |
+          curl -L https://go.dev/dl/go${{ env.GO_VERSION }}.linux-arm64.tar.gz | sudo tar -C /usr/local -xz
+          echo "/usr/local/go/bin" >> $GITHUB_PATH
+
+      - name: Patch ARM & Dockerfile
+        working-directory: envoy-gloo
+        run: |
+          sed -i 's|/build/envoy/x64/bin/release.tar.zst|/build/envoy/arm64/bin/release.tar.zst|g' ci/do_ci.sh
+          cat ci/do_ci.sh
+          cat > ci/Dockerfile-arm <<'EOF'
+          FROM ubuntu:focal
+          ENV loglevel=info
+          ENV DEBIAN_FRONTEND=noninteractive
+          RUN apt-get update && \
+              apt-get install --no-install-recommends -y ca-certificates && \
+              apt-get upgrade -y && \
+              apt-get clean && \
+              rm -rf /var/log/*log /var/lib/apt/lists/* /var/log/apt/* /var/lib/dpkg/*-old /var/cache/debconf/*-old
+          RUN mkdir -p /etc/envoy
+          ADD linux/amd64/build_envoy_release/envoy /usr/local/bin/envoy
+          ENTRYPOINT ["/usr/local/bin/envoy"]
+          CMD ["-c", "/etc/envoy/envoy.yaml"]
+          EOF
+          cat ci/Dockerfile-arm
+
+      - name: Build envoy binary & capture image name
+        working-directory: envoy-gloo
+        id: build
+        run: |
+          . ci/envoy_build_sha.sh
+          echo "build_image=envoyproxy/envoy-build-ubuntu:${ENVOY_BUILD_SHA}" >> $GITHUB_OUTPUT
+          make fast-build-arm
+
+      - name: Docker Login
+        uses: docker/login-action@v3.4.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PASSWD }}
+
+      - name: Tag & push build image
+        run: |
+          SRC=${{ steps.build.outputs.build_image }}
+          DST=docker.io/${{ secrets.DOCKERHUB_USER }}/kgateway-arm64:envoy-${{ env.ENVOY_GLOO_REF }}
+          docker tag "$SRC" "$DST"
+          docker push "$DST"
+          echo "✅ 已推送 build 镜像：$DST"
+
+  wrapper:
+    needs: [check, build]
+    if: always() && (needs.check.outputs.hit == 'false' || success())
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout kgateway
+        uses: actions/checkout@v4
+        with:
+          repository: kgateway-dev/kgateway
+          ref: ${{ github.event.inputs.ref }}
+          path: kgateway
+
+      - name: Build envoy-wrapper with new envoy binary
+        working-directory: kgateway
+        run: |
+          # 使用上一步编译并推送的 envoy 镜像作为 ENVOY_IMAGE
+          ENVOY_IMAGE=docker.io/${{ secrets.DOCKERHUB_USER }}/kgateway-arm64:envoy-${{ env.ENVOY_GLOO_REF }}
+          make envoy-wrapper-docker \
+            VERSION=${{ github.event.inputs.image_tag }} \
+            ENVOY_IMAGE=$ENVOY_IMAGE \
+            IMAGE_REGISTRY=docker.io/${{ secrets.DOCKERHUB_USER }} \
+            ENVOYINIT_IMAGE_REPO=kgateway-arm64 \
+            VERSION=kgateway-envoy-wrapper-${{ github.event.inputs.image_tag }}
+
+      - name: Tag & push final wrapper image
+        run: |
+          FINAL=docker.io/${{ secrets.DOCKERHUB_USER }}/kgateway-arm64:kgateway-envoy-wrapper-${{ github.event.inputs.image_tag }}
+          docker push "$FINAL"
+          echo "✅ 最终 wrapper 镜像：$FINAL"
