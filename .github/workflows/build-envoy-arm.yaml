@@ -93,12 +93,12 @@ jobs:
         working-directory: envoy-gloo
         id: build
         run: |
-          . ci/envoy_build_sha.sh
-          echo "build_image=envoyproxy/envoy-build-ubuntu:${ENVOY_BUILD_SHA}" >> $GITHUB_OUTPUT
+          export IMAGE_ID=$(git rev-parse --short=12 HEAD)
+          echo "build_image=envoyproxy/envoy-build-ubuntu:${IMAGE_ID}" >> $GITHUB_OUTPUT
           echo "===== 构建镜像名 ====="
-          echo "envoyproxy/envoy-build-ubuntu:${ENVOY_BUILD_SHA}"
+          echo "$IMAGE_ID"
           echo "=========================="
-          make fast-build-arm
+          make fast-build-arm IMAGE_ID="$IMAGE_ID"
 
       - name: Docker Login
         uses: docker/login-action@v3.4.0
