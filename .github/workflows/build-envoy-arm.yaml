@@ -42,7 +42,7 @@ jobs:
       - name: Patch ARM & proxy & source
         working-directory: envoy-gloo
         run: |
-          sed -i 's|x86/bin/release.tar.zst|arm64/bin/release.tar.zst|g' ci/do_ci.sh
+          sed -i 's|/build/envoy/x64/bin/release.tar.zst|/build/envoy/arm64/bin/release.tar.zst|g' ci/do_ci.sh
           cat ci/do_ci.sh
           cat > ci/Dockerfile-arm <<'EOF'
           FROM ubuntu:focal
