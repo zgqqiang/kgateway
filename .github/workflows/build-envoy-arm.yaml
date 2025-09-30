@@ -23,7 +23,7 @@ jobs:
       - name: Checkout kgateway
         uses: actions/checkout@v4
         with:
-          repository: kgateway-dev/kgateway
+          repository: ${{ github.repository }}
           ref: ${{ github.event.inputs.ref }}
           path: kgateway
 
@@ -76,7 +76,7 @@ jobs:
       - name: Tag & push build image
         run: |
           SRC=${{ steps.build.outputs.build_image }}
-          DST=docker.io/${{ secrets.DOCKERHUB_USER }}/envoy-build-ubuntu:${{ github.event.inputs.image_tag }}
+          DST=docker.io/${{ secrets.DOCKERHUB_USER }}/kgateway-arm64:envoy-${{ github.event.inputs.image_tag }}
           docker tag "$SRC" "$DST"
           docker push "$DST"
           echo "✅ 已推送 build 镜像：$DST"
