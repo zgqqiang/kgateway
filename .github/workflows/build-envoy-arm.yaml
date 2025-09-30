@@ -93,12 +93,14 @@ jobs:
         working-directory: envoy-gloo
         id: build
         run: |
+          pwd
           cd ci
           . ./envoy_build_sha.sh
           echo "===== 构建镜像名 ====="
           echo "envoyproxy/envoy-build-ubuntu:${ENVOY_BUILD_SHA}"
           echo "=========================="
           cd ..
+          pwd
           echo "build_image=envoyproxy/envoy-build-ubuntu:${ENVOY_BUILD_SHA}" >> $GITHUB_OUTPUT
           make fast-build-arm
 
