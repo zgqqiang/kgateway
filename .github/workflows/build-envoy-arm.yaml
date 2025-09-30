@@ -83,11 +83,17 @@ jobs:
               apt-get clean && \
               rm -rf /var/log/*log /var/lib/apt/lists/* /var/log/apt/* /var/lib/dpkg/*-old /var/cache/debconf/*-old
           RUN mkdir -p /etc/envoy
-          ADD linux/amd64/build_envoy_release/envoy /usr/local/bin/envoy
+          ADD linux/amd64/build_envoy_release_stripped/envoy /usr/local/bin/envoy
           ENTRYPOINT ["/usr/local/bin/envoy"]
           CMD ["-c", "/etc/envoy/envoy.yaml"]
           EOF
           cat ci/Dockerfile-arm
+
+      - name: Docker Login
+        uses: docker/login-action@v3.4.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_PASSWD }}
 
       - name: Build envoy binary & capture image name
         working-directory: envoy-gloo
@@ -98,22 +104,11 @@ jobs:
           echo "===== 构建镜像名 ====="
           echo "envoyproxy/envoy-build-ubuntu:${ENVOY_BUILD_SHA}"
           echo "=========================="
-          echo "build_image=envoyproxy/envoy-build-ubuntu:${ENVOY_BUILD_SHA}" >> $GITHUB_OUTPUT
           make fast-build-arm IMAGE_ID="${ENVOY_BUILD_SHA}"
-
-      - name: Docker Login
-        uses: docker/login-action@v3.4.0
-        with:
-          username: ${{ secrets.DOCKERHUB_USER }}
-          password: ${{ secrets.DOCKERHUB_PASSWD }}
-
-      - name: Tag & push build image
-        run: |
-          SRC=${{ steps.build.outputs.build_image }}
           DST=docker.io/${{ secrets.DOCKERHUB_USER }}/kgateway-arm64:envoy-${{ env.ENVOY_GLOO_REF }}
-          docker tag "$SRC" "$DST"
+          docker build -f ci/Dockerfile-arm -t "$DST" .
           docker push "$DST"
-          echo "✅ 已推送 build 镜像：$DST"
+          echo "build_image=$DST" >> $GITHUB_OUTPUT 
 
   wrapper:
     needs: [check, build]
