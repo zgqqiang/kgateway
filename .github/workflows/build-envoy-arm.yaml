@@ -111,8 +111,8 @@ jobs:
           echo "build_image=$DST" >> $GITHUB_OUTPUT 
 
   wrapper:
-    needs: [check, build]
-    if: always() && (needs.check.outputs.hit == 'false' || success())
+    needs: check
+    if: always()
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout kgateway
